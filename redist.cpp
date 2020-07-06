@@ -187,7 +187,9 @@ int main(int argc, char* argv[])
     boost::mpi::environment env(argc, argv);
     boost::mpi::communicator world;
 
-
+    std::cout << world.rank() << std::endl;
+    return 0;
+/*
     //std::cout << argc << std::endl;
     //std::cout << argv[0] << std::endl;
     inputs inp;
@@ -286,8 +288,8 @@ int main(int argc, char* argv[])
     }
     outstream.close();
 
-
-
+    return 0;
+*/
 
 }
 

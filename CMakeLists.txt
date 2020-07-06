@@ -12,7 +12,7 @@ find_package(MPI REQUIRED)
 find_package( CGAL QUIET COMPONENTS  )
 include( ${CGAL_USE_FILE} )
 
-find_package(Boost 1.58 REQUIRED COMPONENTS mpi serialization system)
+find_package(Boost 1.4 REQUIRED COMPONENTS mpi serialization system)
 INCLUDE_DIRECTORIES(${MPI_INCLUDE_PATH} ${Boost_INCLUDE_DIRS})
 
 add_executable(${PROJECT_NAME} "redist.cpp")
