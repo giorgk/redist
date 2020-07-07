@@ -9,6 +9,10 @@
 #include <vector>
 #include <map>
 
+#include <chrono>
+#include <ctime>
+#include <utility>
+
 #include <boost/mpi.hpp>
 
 
@@ -128,11 +132,14 @@ bool readVelocityFiles(std::string filename, std::vector< PntVel>& points, int m
     }
     else {
         std::cout << "Processor " << myRank << " reads " << filename << std::endl;
+        auto start = std::chrono::high_resolution_clock::now();
         std::string line;
         PntVel pv;
         double x, y;
+        int count_lines = 0;
         while (getline(datafile, line)) {
             if (line.size() > 1) {
+                count_lines++;
                 std::istringstream inp(line.c_str());
                 inp >> x;
                 inp >> y;
@@ -170,6 +177,9 @@ bool readVelocityFiles(std::string filename, std::vector< PntVel>& points, int m
             }
         }
         datafile.close();
+        auto finish = std::chrono::high_resolution_clock::now();
+        std::chrono::duration<double> elapsed = finish - start;
+        std::cout << ". . . .Proc " << myRank << " spend " << elapsed.count() / 60 << " min to read " << count_lines << " lines" << std::endl;
         outcome = true;
     }
     return outcome;
