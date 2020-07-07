@@ -9,14 +9,27 @@
 #include <vector>
 #include <map>
 
+#include <chrono>
+#include <ctime>
+#include <utility>
+
 #include <boost/mpi.hpp>
-#include <boost/iterator/zip_iterator.hpp>
 
-#include <CGAL/Exact_predicates_inexact_constructions_kernel.h>
-#include <CGAL/Triangulation_vertex_base_with_info_2.h>
-#include <CGAL/Point_set_2.h>
-#include <CGAL/Polygon_2.h>
 
+//boost polygon includes
+#include <boost/geometry.hpp>
+#include <boost/geometry/geometries/point_xy.hpp>
+#include <boost/geometry/geometries/polygon.hpp>
+
+// Includes from CGAL
+//#include <boost/iterator/zip_iterator.hpp>
+
+//#include <CGAL/Exact_predicates_inexact_constructions_kernel.h>
+//#include <CGAL/Triangulation_vertex_base_with_info_2.h>
+//#include <CGAL/Point_set_2.h>
+//#include <CGAL/Polygon_2.h>
+
+/*
 struct velpnt {
     double z;
     double vx;
@@ -26,23 +39,43 @@ struct velpnt {
     double ratio;
     int proc;
 };
+*/
 
-typedef CGAL::Exact_predicates_inexact_constructions_kernel K;
-typedef CGAL::Triangulation_vertex_base_with_info_2<velpnt, K> vb2D;
-typedef CGAL::Triangulation_data_structure_2<vb2D> Tds2D;
-typedef CGAL::Point_set_2<K, Tds2D>::Vertex_handle Vertex_handle2D;
-typedef CGAL::Point_set_2<K, Tds2D> PointSet2;
-typedef K::Point_2 cgal_point_2;
-typedef CGAL::Polygon_2<K> Polygon_2;
+struct PntVel {
+    double x;
+    double y;
+    double z;
+    double vx;
+    double vy;
+    double vz;
+    double diam;
+    double ratio;
+    int proc;
+};
+
+//typedef CGAL::Exact_predicates_inexact_constructions_kernel K;
+//typedef CGAL::Triangulation_vertex_base_with_info_2<velpnt, K> vb2D;
+//typedef CGAL::Triangulation_data_structure_2<vb2D> Tds2D;
+//typedef CGAL::Point_set_2<K, Tds2D>::Vertex_handle Vertex_handle2D;
+//typedef CGAL::Point_set_2<K, Tds2D> PointSet2;
+//typedef K::Point_2 cgal_point_2;
+//typedef CGAL::Polygon_2<K> Polygon_2;
 
 
+typedef boost::geometry::model::d2::point_xy<double> bpoint;
+typedef boost::geometry::model::polygon<bpoint> bpoly;
+
+/*
 struct domain {
     std::vector<cgal_point_2> xy;
     //std::vector<double> x;
     //std::vector<double> y;
 };
+*/
 
-typedef std::map<int, domain> DomainList;
+//typedef std::map<int, domain> DomainList;
+
+typedef std::map<int, bpoly> DomainListPoly;
 
 struct inputs {
     int NinitDom;
@@ -90,6 +123,70 @@ bool readInputFile(std::string filename, inputs& input) {
     return outcome;
 }
 
+bool readVelocityFiles(std::string filename, std::vector< PntVel>& points, int myRank, 
+    DomainListPoly& expanded, DomainListPoly& actual) {
+    bool outcome = false;
+    std::ifstream datafile(filename.c_str());
+    if (!datafile.good()) {
+        std::cout << "Can't open the file" << filename << std::endl;
+    }
+    else {
+        std::cout << "Processor " << myRank << " reads " << filename << std::endl;
+        auto start = std::chrono::high_resolution_clock::now();
+        std::string line;
+        PntVel pv;
+        double x, y;
+        int count_lines = 0;
+        while (getline(datafile, line)) {
+            if (line.size() > 1) {
+                count_lines++;
+                std::istringstream inp(line.c_str());
+                inp >> x;
+                inp >> y;
+                if (boost::geometry::within(bpoint(x, y), expanded[myRank])) {
+                    int proc = -9;
+                    if (boost::geometry::within(bpoint(x, y), actual[myRank])) {
+                        proc = myRank;
+                    }
+                    else {
+                        DomainListPoly::iterator it = actual.begin();
+                        for (; it != actual.end(); ++it) {
+                            if (it->first == myRank)
+                                continue;
+                            if (boost::geometry::within(bpoint(x, y), it->second)) {
+                                proc = it->first;
+                                break;
+                            }
+                        }
+                    }
+                    if (proc == -9) {
+                        std::cout << "Cant find actual domain for point (" << x << "," << y << ") in my expanded domain with id " << myRank <<  std::endl;
+                    }
+                    pv.x = x;
+                    pv.y = y;
+                    inp >> pv.z;
+                    inp >> pv.vx;
+                    inp >> pv.vy;
+                    inp >> pv.vz;
+                    pv.proc = proc;
+                    inp >> proc;
+                    inp >> pv.diam;
+                    inp >> pv.ratio;
+                    points.push_back(pv);
+                }
+            }
+        }
+        datafile.close();
+        auto finish = std::chrono::high_resolution_clock::now();
+        std::chrono::duration<double> elapsed = finish - start;
+        std::cout << ". . . .Proc " << myRank << " spend " << elapsed.count() / 60 << " min to read " << count_lines << " lines" << std::endl;
+        outcome = true;
+    }
+    return outcome;
+
+}
+
+/*
 bool readVelocityFields(std::string filename, PointSet2& Pset) {
     bool outcome = false;
     std::ifstream datafile(filename.c_str());
@@ -125,7 +222,49 @@ bool readVelocityFields(std::string filename, PointSet2& Pset) {
     }
     return outcome;
 }
+*/
 
+bool readDomain(std::string filename, DomainListPoly& dpoly) {
+    bool outcome = false;
+    std::ifstream datafile(filename.c_str());
+    if (!datafile.good()) {
+        std::cout << "Can't open the file" << filename << std::endl;
+    }
+    else {
+        std::string line;
+        getline(datafile, line);
+        int Npoly, id, nVerts;
+        double x, y;
+        {
+            std::istringstream inp(line.c_str());
+            inp >> Npoly;
+        }
+        for (int i = 0; i < Npoly; ++i) {
+            std::vector<bpoint> pnts;
+            getline(datafile, line); {
+                std::istringstream inp(line.c_str());
+                inp >> id;
+                inp >> nVerts;
+            }
+            for (int j = 0; j < nVerts; ++j) {
+                getline(datafile, line);
+                std::istringstream inp(line.c_str());
+                inp >> x;
+                inp >> y;
+                pnts.push_back(bpoint(x, y));
+            }
+            bpoly poly;
+            boost::geometry::assign_points(poly, pnts);
+            boost::geometry::correct(poly);
+            dpoly.insert(std::make_pair(id, poly));
+        }
+        datafile.close();
+        outcome = true;
+    }
+    return outcome;
+}
+
+/*
 bool readDomain(std::string filename, DomainList& dl) {
     bool outcome = false;
     std::ifstream datafile(filename.c_str());
@@ -175,7 +314,7 @@ bool readDomain(std::string filename, DomainList& dl) {
     }
     return outcome;
 }
-
+*/
 std::string num2Padstr(int i, int n) {
     std::stringstream ss;
     ss << std::setw(n) << std::setfill('0') << i;
@@ -187,15 +326,44 @@ int main(int argc, char* argv[])
     boost::mpi::environment env(argc, argv);
     boost::mpi::communicator world;
 
-    std::cout << world.rank() << std::endl;
-    return 0;
-/*
     //std::cout << argc << std::endl;
     //std::cout << argv[0] << std::endl;
     inputs inp;
     bool tf = readInputFile(argv[1], inp);
     if (!tf)
         return 0;
+
+    DomainListPoly actualDom, expandedDom;
+    tf = readDomain(inp.ActualDomainFile, actualDom);
+    if (!tf)
+        return 0;
+    tf = readDomain(inp.ExpadnedDomainFile, expandedDom);
+    if (!tf)
+        return 0;
+
+    std::vector< PntVel> my_data;
+    for (int iproc = 0; iproc < inp.NinitDom; ++iproc) {
+        std::string filename = inp.prefix + num2Padstr(iproc, inp.Nzeros) + inp.suffix;
+        tf = readVelocityFiles(filename, my_data, world.rank(), expandedDom, actualDom);
+    }
+
+    std::cout << "____ Processor " << world.rank() << " is printing..." << std::endl;
+    std::string outfilename = inp.NewPrefix + num2Padstr(world.rank(), inp.Nzeros) + inp.suffix;
+    std::ofstream outstream;
+    outstream.open(outfilename.c_str());
+    for (std::vector<PntVel>::iterator it = my_data.begin(); it != my_data.end(); ++it) {
+        outstream << std::setprecision(2) << std::fixed
+            << it->x << " " << it->y << " " << it->z << " "
+            << std::setprecision(6) << std::fixed
+            << it->vx << " " << it->vy << " " << it->vz << " " << it->proc << " "
+            << std::setprecision(1) << std::fixed
+            << it->diam << " " << it->ratio << std::endl;
+    }
+    outstream.close();
+    world.barrier();
+    return 0;
+
+/*
     DomainList actualDom, expandedDom;
     tf = readDomain(inp.ActualDomainFile, actualDom);
     if (!tf)
