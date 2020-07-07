@@ -9,12 +9,15 @@
 #include <vector>
 #include <map>
 
-#include <chrono>
-#include <ctime>
-#include <utility>
+//#include <chrono>
+//#include <ctime>
+//#include <utility>
 
 #include <boost/mpi.hpp>
 
+// Timing
+#include <boost/timer/timer.hpp>
+#include <boost/chrono.hpp>
 
 //boost polygon includes
 #include <boost/geometry.hpp>
@@ -132,7 +135,10 @@ bool readVelocityFiles(std::string filename, std::vector< PntVel>& points, int m
     }
     else {
         std::cout << "Processor " << myRank << " reads " << filename << std::endl;
-        auto start = std::chrono::high_resolution_clock::now();
+        // Start timing
+        //auto start = std::chrono::high_resolution_clock::now();
+        boost::timer::cpu_timer timer;
+
         std::string line;
         PntVel pv;
         double x, y;
@@ -177,9 +183,11 @@ bool readVelocityFiles(std::string filename, std::vector< PntVel>& points, int m
             }
         }
         datafile.close();
-        auto finish = std::chrono::high_resolution_clock::now();
-        std::chrono::duration<double> elapsed = finish - start;
-        std::cout << ". . . .Proc " << myRank << " spend " << elapsed.count() / 60 << " min to read " << count_lines << " lines" << std::endl;
+        
+        //auto finish = std::chrono::high_resolution_clock::now();
+        //std::chrono::duration<double> elapsed = finish - start;
+        boost::chrono::duration<double> seconds = boost::chrono::nanoseconds(timer.elapsed().user);
+        std::cout << ". . . .Proc " << myRank << " spend " << seconds.count() / 60 << " min to read " << count_lines << " lines" << std::endl;
         outcome = true;
     }
     return outcome;
