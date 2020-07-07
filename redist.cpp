@@ -10,6 +10,14 @@
 #include <map>
 
 #include <boost/mpi.hpp>
+
+
+//boost polygon includes
+#include <boost/geometry.hpp>
+#include <boost/geometry/geometries/point_xy.hpp>
+#include <boost/geometry/geometries/polygon.hpp>
+
+// Includes from CGAL
 #include <boost/iterator/zip_iterator.hpp>
 
 #include <CGAL/Exact_predicates_inexact_constructions_kernel.h>
@@ -36,6 +44,10 @@ typedef K::Point_2 cgal_point_2;
 typedef CGAL::Polygon_2<K> Polygon_2;
 
 
+typedef boost::geometry::model::d2::point_xy<double> bpoint;
+typedef boost::geometry::model::polygon<bpoint> bpoly;
+
+
 struct domain {
     std::vector<cgal_point_2> xy;
     //std::vector<double> x;
@@ -43,6 +55,8 @@ struct domain {
 };
 
 typedef std::map<int, domain> DomainList;
+
+typedef std::map<int, bpoly> DomainListPoly;
 
 struct inputs {
     int NinitDom;
