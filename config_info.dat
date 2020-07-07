@@ -1,0 +1,6 @@
+To compile this use the following command to link it against my own boost built
+If linking agains Boost and CGAL use this:
+cmake -DCMAKE_BUILD_TYPE=Release -DCGAL_DIR:PATH=/nfs/aqua-z0/giorgk/progs/cgal-releases-CGAL-4.13/build/release -DBoost_NO_BOOST_CMAKE=TRUE -DBoost_NO_SYSTEM_PATHS=TRUE -DBOOST_ROOT:PATHNAME=/nfs/aqua-z0/giorgk/progs/BOOST_1_73_INSTALL ..
+
+If Link against Boost only use this:
+cmake -DCMAKE_BUILD_TYPE=Release -DBoost_NO_BOOST_CMAKE=TRUE -DBoost_NO_SYSTEM_PATHS=TRUE -DBOOST_ROOT:PATHNAME=/nfs/aqua-z0/giorgk/progs/BOOST_1_73_INSTALL ..
