@@ -24,72 +24,93 @@
 #include <boost/geometry/geometries/point_xy.hpp>
 #include <boost/geometry/geometries/polygon.hpp>
 
-// Includes from CGAL
-//#include <boost/iterator/zip_iterator.hpp>
-
-//#include <CGAL/Exact_predicates_inexact_constructions_kernel.h>
-//#include <CGAL/Triangulation_vertex_base_with_info_2.h>
-//#include <CGAL/Point_set_2.h>
-//#include <CGAL/Polygon_2.h>
-
-/*
-struct velpnt {
-    double z;
-    double vx;
-    double vy;
-    double vz;
-    double diam;
-    double ratio;
-    int proc;
-};
-*/
-
+/**
+ * PntVel is a structure that holds information for a single point.
+ */
 struct PntVel {
+    // x coordinate
     double x;
+    // y coordinate
     double y;
+    // z coordinate
     double z;
+    // x velocity
     double vx;
+    // y velocity
     double vy;
+    // z velocity
     double vz;
+    // the diameter of the mesh element that this point belonged in the original mesh
     double diam;
+    // the ratio of the xy length / z length of the mesh element
     double ratio;
+    // the processor that owns this point
     int proc;
 };
 
-//typedef CGAL::Exact_predicates_inexact_constructions_kernel K;
-//typedef CGAL::Triangulation_vertex_base_with_info_2<velpnt, K> vb2D;
-//typedef CGAL::Triangulation_data_structure_2<vb2D> Tds2D;
-//typedef CGAL::Point_set_2<K, Tds2D>::Vertex_handle Vertex_handle2D;
-//typedef CGAL::Point_set_2<K, Tds2D> PointSet2;
-//typedef K::Point_2 cgal_point_2;
-//typedef CGAL::Polygon_2<K> Polygon_2;
 
 
+// The boost definition for 2D points
 typedef boost::geometry::model::d2::point_xy<double> bpoint;
+// The boost definition for polygons that use 2D boost points
 typedef boost::geometry::model::polygon<bpoint> bpoly;
 
-/*
-struct domain {
-    std::vector<cgal_point_2> xy;
-    //std::vector<double> x;
-    //std::vector<double> y;
-};
-*/
-
-//typedef std::map<int, domain> DomainList;
-
+// The definition for a list of boost 2D polygons
 typedef std::map<int, bpoly> DomainListPoly;
 
+/**
+ * A structure that contains all the input parameters.
+ * 
+ * The input parameters are listed in a single file. Each line holds one parameter
+ * The format of the input file is not flexible at all. No comments allowed or any literals with spaces or any weird looking characters
+ * 
+ * They must be listed in the following order
+ */
 struct inputs {
+    // The number of subdomains that the problem was originaly solved. This is the number of processors used in the simulation step
     int NinitDom;
+    /**
+     * The velocity information is usually printed into files with the following format:
+     * 
+     * f:\UCDAVIS\ichnos\NPSAT_example\example1__0000.ich.
+     * 
+     * The above name essentially consists of three parts. 
+     * 
+     * 1. prefix :  f:\UCDAVIS\ichnos\NPSAT_example\example1__
+     * 2. processor number : which must have identical zero padding for all processors. 
+     * 3 suffix : .ich
+     * 
+     * Nzeros is the width of the processor number 
+     */
     int Nzeros;
+    // This is the file name along with the path if it lives in a different folder than the program
     std::string prefix;
+    /** 
+     * The characters after the processor id.
+     * If the file is example1__0000_test01.ich then the suffix is _test01.ich
+     */
     std::string suffix;
+    /**
+     * The file name that containts the new expanded domain boundaries.
+     */
     std::string ExpadnedDomainFile;
+    /**
+     * The file name that containts the new actual domain boundaries.
+     */
     std::string ActualDomainFile;
+    // This is the prefix where the redistributed velocity fields will be printed
     std::string NewPrefix;
 };
 
+/**
+ * readInputFile parse the input file.
+ * 
+ * See the documentation of the #input for details about the format
+ * 
+ * \param filename
+ * \param input
+ * \return true if the reading was succefull.
+ */
 bool readInputFile(std::string filename, inputs& input) {
     bool outcome = false;
     std::ifstream datafile(filename.c_str());
@@ -126,6 +147,17 @@ bool readInputFile(std::string filename, inputs& input) {
     return outcome;
 }
 
+/**
+ * Reads the original velocity files and selects the points that belong to myRank new subdomain.
+ * 
+ * 
+ * \param filename is the original velocity file name.
+ * \param points is a vector to holds the points that live on the new subdomain with id myRank
+ * \param myRank is the current processor id
+ * \param expanded is a list of the expanded domains
+ * \param actual is a list of the actual domains
+ * \return true if everything was succesfull 
+ */
 bool readVelocityFiles(std::string filename, std::vector< PntVel>& points, int myRank, 
     DomainListPoly& expanded, DomainListPoly& actual) {
     bool outcome = false;
@@ -194,44 +226,25 @@ bool readVelocityFiles(std::string filename, std::vector< PntVel>& points, int m
 
 }
 
-/*
-bool readVelocityFields(std::string filename, PointSet2& Pset) {
-    bool outcome = false;
-    std::ifstream datafile(filename.c_str());
-    if (!datafile.good()) {
-        std::cout << "Can't open the file" << filename << std::endl;
-    }
-    else {
-        std::string line;
-        double x, y;
-        velpnt vpnt;
-        int proc;
-        std::vector< std::pair<cgal_point_2, velpnt> > xy_data;
-        while (getline(datafile, line)) {
-            if (line.size() > 1) {
-                std::istringstream inp(line.c_str());
-                inp >> x;
-                inp >> y;
-                inp >> vpnt.z;
-                inp >> vpnt.vx;
-                inp >> vpnt.vy;
-                inp >> vpnt.vz;
-                inp >> proc;
-                inp >> vpnt.diam;
-                inp >> vpnt.ratio;
-                vpnt.proc = -9;
-                cgal_point_2 p(x, y);
-                xy_data.push_back(std::make_pair(p, vpnt));
-            }
-        }
-        Pset.insert(xy_data.begin(), xy_data.end());
-        outcome = true;
-        datafile.close();
-    }
-    return outcome;
-}
-*/
-
+/**
+ * Reads the 2D polygons that define the new subdomains.
+ * 
+ * \param filename is the name of the file
+ * \param dpoly is a list of 2D polygons where each polygon is one domain.
+ * \return true if reading was wihtout any issues
+ * 
+ * The fromat of the file is the following:
+ * 
+ * Line 1: Npoly Number of polygons listed in this file
+ * 
+ * Line 2: ID Nverts, ID is the processor ID and Nverts is the number of vertices of the polygon
+ * 
+ * Repeat Nverts times
+ * X Y 
+ * 
+ * Repeat Npoly times the above starting from Line 2
+ * 
+ */
 bool readDomain(std::string filename, DomainListPoly& dpoly) {
     bool outcome = false;
     std::ifstream datafile(filename.c_str());
@@ -272,57 +285,13 @@ bool readDomain(std::string filename, DomainListPoly& dpoly) {
     return outcome;
 }
 
-/*
-bool readDomain(std::string filename, DomainList& dl) {
-    bool outcome = false;
-    std::ifstream datafile(filename.c_str());
-    if (!datafile.good()) {
-        std::cout << "Can't open the file" << filename << std::endl;
-    }
-    else {
-        std::string line;
-        getline(datafile, line);
-        int Npoly, id, nVerts;
-        double x, y;
-        {
-            std::istringstream inp(line.c_str());
-            inp >> Npoly;
-        }
-        for (int i = 0; i < Npoly; ++i) {
-            getline(datafile, line);
-            {
-                std::istringstream inp(line.c_str());
-                inp >> id;
-                inp >> nVerts;
-            }
-            domain d;
-            //Polygon_2 poly;
-            for (int j = 0; j < nVerts; ++j) {
-                getline(datafile, line);
-                std::istringstream inp(line.c_str());
-                inp >> x;
-                inp >> y;
-                //poly.push_back(cgal_point_2(x, y));
-                //d.x.push_back(x);
-                //d.y.push_back(y);
-                d.xy.push_back(cgal_point_2(x, y));
-            }
-
-            //if (poly.is_clockwise_oriented()) {
-            //    poly.reverse_orientation();
-            //}
-            //for (int j = 0; j < nVerts; ++j) {
-            //    d.x.push_back(poly.vertex(i).x());
-            //    d.y.push_back(poly.vertex(i).y());
-            //}
-            dl.insert(std::make_pair(id, d));
-        }
-        datafile.close();
-        outcome = true;
-    }
-    return outcome;
-}
-*/
+/**
+ * This converts an integer to string with specified number of zero padding.
+ * 
+ * \param i is the integer number to convert to string
+ * \param n is the number of zeros to fill in
+ * \return the integer in a string format
+ */
 std::string num2Padstr(int i, int n) {
     std::stringstream ss;
     ss << std::setw(n) << std::setfill('0') << i;
@@ -370,112 +339,5 @@ int main(int argc, char* argv[])
     outstream.close();
     world.barrier();
     return 0;
-
-/*
-    DomainList actualDom, expandedDom;
-    tf = readDomain(inp.ActualDomainFile, actualDom);
-    if (!tf)
-        return 0;
-    tf = readDomain(inp.ExpadnedDomainFile, expandedDom);
-    if (!tf)
-        return 0;
-
-
-    domain myExpandeddomain = expandedDom[world.rank()];
-    std::vector< std::pair<cgal_point_2, velpnt> > my_data;
-    PointSet2 PsetMyRank; // This contains all the points that exist in the expanded domain of my rank
-    // Loop through the velocity files and create Tree structures for each subdomain
-    
-    for (int iproc = 0; iproc < inp.NinitDom; ++iproc) {
-        std::cout << "--Processor " << world.rank() << " is reading data from " << iproc << std::endl;
-        // This contains all the points from the processor iproc
-        PointSet2 PsetProc;
-        
-        std::string filename = inp.prefix + num2Padstr(iproc, inp.Nzeros) + inp.suffix;
-        tf = readVelocityFields(filename, PsetProc);
-        if (!tf) {
-            std::cout << "Error while reading " << filename << std::endl;
-            return 0;
-        }
-
-        // Find the points in my extended domain
-        // split the rectangular areas into 2 triangles
-        {// First Triangle
-            std::list<Vertex_handle2D> LV;
-            PsetProc.range_search(myExpandeddomain.xy[0], myExpandeddomain.xy[1], myExpandeddomain.xy[2], std::back_inserter(LV));
-            std::list<Vertex_handle2D>::const_iterator it = LV.begin();
-            for (; it != LV.end(); ++it) {
-                my_data.push_back(std::make_pair((*it)->point(), (*it)->info()));
-            }
-        }
-        {// First Triangle
-            std::list<Vertex_handle2D> LV;
-            PsetProc.range_search(myExpandeddomain.xy[0], myExpandeddomain.xy[2], myExpandeddomain.xy[3], std::back_inserter(LV));
-            std::list<Vertex_handle2D>::const_iterator it = LV.begin();
-            for (; it != LV.end(); ++it) {
-                my_data.push_back(std::make_pair((*it)->point(), (*it)->info()));
-            }
-        }
-    }
-    PsetMyRank.insert(my_data.begin(), my_data.end());
-
-    // Now loop through the new domain boundaries to assign processor ids
-    std::cout << "=== Processor " << world.rank() << " is identifying  owners" << std::endl;
-    DomainList::iterator itdom = actualDom.begin();
-    for (; itdom != actualDom.end(); ++itdom) {
-        
-        { // Search the first triangle
-            std::list<Vertex_handle2D> LV;
-            PsetMyRank.range_search(itdom->second.xy[0], itdom->second.xy[1], itdom->second.xy[2], std::back_inserter(LV));
-            std::list<Vertex_handle2D>::const_iterator it = LV.begin();
-            for (; it != LV.end(); ++it) {
-                (*it)->info().proc = itdom->first;
-            }
-        }
-        { // Search the second triangle
-            std::list<Vertex_handle2D> LV;
-            PsetMyRank.range_search(itdom->second.xy[0], itdom->second.xy[2], itdom->second.xy[3], std::back_inserter(LV));
-            std::list<Vertex_handle2D>::const_iterator it = LV.begin();
-            for (; it != LV.end(); ++it) {
-                (*it)->info().proc = itdom->first;
-            }
-        }
-    }
-
-    // Last print the new domain data
-    std::cout << "____ Processor " << world.rank() << " is printing..." << std::endl;
-    int count_pnts = 0;
-    std::string outfilename = inp.NewPrefix + num2Padstr(world.rank(), inp.Nzeros) + inp.suffix;
-    std::ofstream outstream;
-    outstream.open(outfilename.c_str());
-    {
-        CGAL::Triangulation_2<K,Tds2D>::Finite_vertices_iterator itt = PsetMyRank.finite_vertices_begin();
-        for (; itt != PsetMyRank.finite_vertices_end(); ++itt) {
-            outstream << std::setprecision(2) << std::fixed
-                << itt->point().x() << " " << itt->point().y() << " " << itt->info().z << " "
-                << std::setprecision(6) << std::fixed
-                << itt->info().vx << " " << itt->info().vy << " " << itt->info().vz << " "
-                << itt->info().proc << " " << itt->info().diam << " " << itt->info().ratio << std::endl;
-            count_pnts++;
-        }
-    }
-    if (count_pnts != my_data.size()) {
-        std::cout << "Count Points = " << count_pnts << " but  my_data.size is " << my_data.size() << std::endl;
-    }
-    outstream.close();
-
-    return 0;
-*/
-
 }
 
-// Run program: Ctrl + F5 or Debug > Start Without Debugging menu
-// Debug program: F5 or Debug > Start Debugging menu
-
-// Tips for Getting Started: 
-//   1. Use the Solution Explorer window to add/manage files
-//   2. Use the Team Explorer window to connect to source control
-//   3. Use the Output window to see build output and other messages
-//   4. Use the Error List window to view errors
-//   5. Go to Project > Add New Item to create new code files, or Project > Add Existing Item to add existing code files to the project
-//   6. In the future, to open this project again, go to File > Open > Project and select the .sln file
