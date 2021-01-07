@@ -35,17 +35,19 @@ struct PntVel {
     // z coordinate
     double z;
     // x velocity
-    double vx;
+    //double vx;
     // y velocity
-    double vy;
+    //double vy;
     // z velocity
-    double vz;
+    //double vz;
     // the diameter of the mesh element that this point belonged in the original mesh
-    double diam;
+    //double diam;
     // the ratio of the xy length / z length of the mesh element
-    double ratio;
+    //double ratio;
     // the processor that owns this point
-    int proc;
+    //int proc;
+    std::vector<double> doubleInfo;
+    std::vector<int> intInfo;
 };
 
 
@@ -100,6 +102,10 @@ struct inputs {
     std::string ActualDomainFile;
     // This is the prefix where the redistributed velocity fields will be printed
     std::string NewPrefix;
+    std::vector<int> InfoType;
+    int Ninfo;
+    std::vector<int> prec;
+
 };
 
 /**
@@ -130,6 +136,28 @@ bool readInputFile(std::string filename, inputs& input) {
             // Ending of file name
             inp >> input.suffix;
         }
+
+        {// get the information of the points
+            getline(datafile, line);
+            std::istringstream inp(line.c_str());
+            inp >> input.Ninfo;
+            for (int i = 0; i < input.Ninfo; i++){
+                int t;
+                inp >> t;
+                input.InfoType.push_back(t);
+            }
+        }
+
+        {// Get the precision for the floating numbers
+            getline(datafile, line);
+            std::istringstream inp(line.c_str());
+            for (int i = 0; i < input.Ninfo; i++) {
+                int t;
+                inp >> t;
+                input.prec.push_back(t);
+            }
+        }
+
         { 
             getline(datafile, line);
             std::istringstream inp(line.c_str());
@@ -159,7 +187,7 @@ bool readInputFile(std::string filename, inputs& input) {
  * \return true if everything was succesfull 
  */
 bool readVelocityFiles(std::string filename, std::vector< PntVel>& points, int myRank, 
-    DomainListPoly& expanded, DomainListPoly& actual) {
+    DomainListPoly& expanded, DomainListPoly& actual, inputs& input) {
     bool outcome = false;
     std::ifstream datafile(filename.c_str());
     if (!datafile.good()) {
@@ -172,10 +200,10 @@ bool readVelocityFiles(std::string filename, std::vector< PntVel>& points, int m
         boost::timer::cpu_timer timer;
 
         std::string line;
-        PntVel pv;
         double x, y;
         int count_lines = 0;
         while (getline(datafile, line)) {
+            PntVel pv;
             if (line.size() > 1) {
                 count_lines++;
                 std::istringstream inp(line.c_str());
@@ -203,13 +231,26 @@ bool readVelocityFiles(std::string filename, std::vector< PntVel>& points, int m
                     pv.x = x;
                     pv.y = y;
                     inp >> pv.z;
-                    inp >> pv.vx;
-                    inp >> pv.vy;
-                    inp >> pv.vz;
-                    pv.proc = proc;
-                    inp >> proc;
-                    inp >> pv.diam;
-                    inp >> pv.ratio;
+                    double dd;
+                    int ii;
+                    for (int i = 0; i < input.Ninfo; i++)
+                    {
+                        if (input.InfoType[i] == 0) {
+                            inp >> dd;
+                            pv.doubleInfo.push_back(dd);
+                        }
+                        else {
+                            inp >> ii;
+                            pv.intInfo.push_back(ii);
+                        }
+                    }
+                    //inp >> pv.vx;
+                    //inp >> pv.vy;
+                    //inp >> pv.vz;
+                    //pv.proc = proc;
+                    //inp >> proc;
+                    //inp >> pv.diam;
+                    //inp >> pv.ratio;
                     points.push_back(pv);
                 }
             }
@@ -321,7 +362,7 @@ int main(int argc, char* argv[])
     std::vector< PntVel> my_data;
     for (int iproc = 0; iproc < inp.NinitDom; ++iproc) {
         std::string filename = inp.prefix + num2Padstr(iproc, inp.Nzeros) + inp.suffix;
-        tf = readVelocityFiles(filename, my_data, world.rank(), expandedDom, actualDom);
+        tf = readVelocityFiles(filename, my_data, world.rank(), expandedDom, actualDom, inp);
     }
 
     std::cout << "____ Processor " << world.rank() << " is printing..." << std::endl;
@@ -329,12 +370,22 @@ int main(int argc, char* argv[])
     std::ofstream outstream;
     outstream.open(outfilename.c_str());
     for (std::vector<PntVel>::iterator it = my_data.begin(); it != my_data.end(); ++it) {
-        outstream << std::setprecision(2) << std::fixed
-            << it->x << " " << it->y << " " << it->z << " "
-            << std::setprecision(6) << std::fixed
-            << it->vx << " " << it->vy << " " << it->vz << " " << it->proc << " "
-            << std::setprecision(1) << std::fixed
-            << it->diam << " " << it->ratio << std::endl;
+        outstream << std::setprecision(3) << std::fixed
+            << it->x << " " << it->y << " " << it->z << " ";
+            
+        int d_cnt = 0;
+        int i_cnt = 0;
+        for (int i = 0; i < inp.Ninfo; i++){
+            if (inp.InfoType[i] == 0) {
+                outstream << std::setprecision(inp.prec[i]) << std::fixed << it->doubleInfo[d_cnt] << " ";
+                d_cnt++;
+            }
+            else {
+                outstream << it->intInfo[i_cnt] << " ";
+                i_cnt++;
+            }
+        }
+        outstream << std::endl;
     }
     outstream.close();
     world.barrier();

@@ -1,0 +1,5 @@
+6 example1_v2_ 4 .vel
+6 0 0 0 1 0 0
+6 6 6 0 2 2
+example1_actual_dom.dat example1_expanded_dom.dat
+examp1_v2_new_

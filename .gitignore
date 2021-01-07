@@ -355,3 +355,10 @@ MigrationBackup/
 
 # other files and folders
 *build
+
+# Add example folder and sample data
+!/Example_data/*.vel
+!/Example_data/*.dat
+!/Example_data/*.txt
+!/Example_data/*.png 
+!/Example_data/*.hipnc
