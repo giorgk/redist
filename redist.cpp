@@ -44,8 +44,8 @@ struct PntVel {
     //double diam;
     // the ratio of the xy length / z length of the mesh element
     //double ratio;
-    // the processor that owns this point
-    //int proc;
+    // the processor that owns this point in the new distribution
+    int proc;
     std::vector<double> doubleInfo;
     std::vector<int> intInfo;
 };
@@ -231,6 +231,7 @@ bool readVelocityFiles(std::string filename, std::vector< PntVel>& points, int m
                     pv.x = x;
                     pv.y = y;
                     inp >> pv.z;
+                    pv.proc = proc;
                     double dd;
                     int ii;
                     for (int i = 0; i < input.Ninfo; i++)
@@ -371,7 +372,7 @@ int main(int argc, char* argv[])
     outstream.open(outfilename.c_str());
     for (std::vector<PntVel>::iterator it = my_data.begin(); it != my_data.end(); ++it) {
         outstream << std::setprecision(3) << std::fixed
-            << it->x << " " << it->y << " " << it->z << " ";
+            << it->x << " " << it->y << " " << it->z << " " << it->proc << " ";
             
         int d_cnt = 0;
         int i_cnt = 0;
