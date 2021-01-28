@@ -13,6 +13,7 @@
 //#include <ctime>
 //#include <utility>
 
+#include <boost/filesystem.hpp>
 #include <boost/mpi.hpp>
 
 // Timing
@@ -348,6 +349,7 @@ int main(int argc, char* argv[])
     //std::cout << argc << std::endl;
     //std::cout << argv[0] << std::endl;
     inputs inp;
+    std::cout << "Current path: " << boost::filesystem::current_path() << std::endl;
     bool tf = readInputFile(argv[1], inp);
     if (!tf)
         return 0;

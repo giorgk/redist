@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 2.8)
 
-set(CMAKE_BUILD_TYPE Release)
+set(CMAKE_BUILD_TYPE Debug)
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++11 -Wall -Wextra")
 set(CMAKE_CXX_FLAGS_DEBUG "-g")
 set(CMAKE_CXX_FLAGS_RELEASE "-O3")
@@ -12,7 +12,7 @@ find_package(MPI REQUIRED)
 #find_package( CGAL QUIET COMPONENTS  )
 #include( ${CGAL_USE_FILE} )
 
-find_package(Boost 1.4 REQUIRED COMPONENTS mpi serialization system)
+find_package(Boost 1.4 REQUIRED COMPONENTS mpi serialization system timer chrono filesystem)
 INCLUDE_DIRECTORIES(${MPI_INCLUDE_PATH} ${Boost_INCLUDE_DIRS})
 
 add_executable(${PROJECT_NAME} "redist.cpp")
