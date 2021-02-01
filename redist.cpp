@@ -122,7 +122,7 @@ bool readInputFile(std::string filename, inputs& input) {
     bool outcome = false;
     std::ifstream datafile(filename.c_str());
     if (!datafile.good()) {
-        std::cout << "Can't open the file" << filename << std::endl;
+        std::cout << "Can't open the file " << filename << std::endl;
     }
     else {
         std::string line;
@@ -192,7 +192,7 @@ bool readVelocityFiles(std::string filename, std::vector< PntVel>& points, int m
     bool outcome = false;
     std::ifstream datafile(filename.c_str());
     if (!datafile.good()) {
-        std::cout << "Can't open the file" << filename << std::endl;
+        std::cout << "Can't open the file " << filename << std::endl;
     }
     else {
         std::cout << "Processor " << myRank << " reads " << filename << std::endl;

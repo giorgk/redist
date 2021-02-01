@@ -362,3 +362,7 @@ MigrationBackup/
 !/Example_data/*.txt
 !/Example_data/*.png 
 !/Example_data/*.hipnc
+
+*.idea
+*.vscode
+*cmake-build-debug
