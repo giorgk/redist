@@ -14,25 +14,41 @@ Therefore the purpose of this utility program is to redistrube the dofs into a r
 
 How to use
 ---
-First prepare an input file such as the following
+First prepare an input file with the following format
 ```
-6 example1_v2_ 4 .vel
-6 0 0 0 1 0 0
-6 6 6 0 2 2
-example1_actual_dom.dat example1_expanded_dom.dat
-examp1_v2_new_
+Nproc prefix leadingZeros suffix
+Ndata NprintData Col1 Col2 ...
+Ndigit1 Ndigit2 Ndigit3 ...
+ActualDomain ExpandedDomain
+NewPrefix 
 ```
-Number of domains in the FEM simulation - 
-Prefix -
-Size of zero padding -
-Suffix </br>
-The number of fields after the coordinates and the field type. 0 for double, 1 for integer </br>
-The precision for the doubles in the new file </br> 
-Filename with the actual domains -
-Filename with the expanded domains </br>
-New prefix
+where 
 
-In the example above the left lower corner has coordinates (-5000, -2500) and the upper right corner (5000, 2500). The actual and expanded domain files that correspond to the above figure with blue and red rectangles respectively can be found under this repository
+`Nproc` is the number of domains in the FEM simulation </br>
+`prefix` is the prefix of the velocity file names </br>
+`leadingZeros` is the number of zero padding in the velocity file name </br>
+`suffix` is the file extension </br>
+`Ndata` is the number of data in the velocity files without the `x,y,z` coordinates </br>
+`NprintData` is the number of data to print. This number equal or less than ` Ndata` </br>
+`Col1 Col2 ...` are the column indices of the Ndata in the order that should be printed </br>
+`Ndigit1 Ndigit2 Ndigit3 ...` is the number of decimals in the new file</br>
+`ActualDomain` The filename that containts the polygons of the actual domains</br>
+`ExpandedDomain` The filename that containts the polygons of the expanded domains</br>
+`NewPrefix` The new prefix. The filename will have the same leading zeros and extension as the initial files
+
+For example</br>
+```
+4 example1_ 4 .vel
+6 5 5 6 1 2 3 
+2 2 6 6 6
+example1_actual_dom.dat example1_expanded_dom.dat
+examp1e1_new_
+```
+For the above input file the FEM simulation was carried out on 4 processors.</br>
+The second line indicates that the initial files contain 6 columns of data but only 5 of them will be printed. The columns 5 and 6 will be printed with 2 decimal digits and the columns 1 2 3 with 6 decimal digits. 
+
+
+In the figure above the left lower corner has coordinates (-5000, -2500) and the upper right corner (5000, 2500). The actual and expanded domain files that correspond to the above figure with blue and red rectangles respectively can be found under this repository
 
 Then run the code using as many cores as the number of polygons in the actual and expanded domain files. For this example this is 4 i.e.
 ```

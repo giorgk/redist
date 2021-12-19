@@ -47,8 +47,7 @@ struct PntVel {
     //double ratio;
     // the processor that owns this point in the new distribution
     int proc;
-    std::vector<double> doubleInfo;
-    std::vector<int> intInfo;
+    std::vector<double> data;
 };
 
 
@@ -103,9 +102,11 @@ struct inputs {
     std::string ActualDomainFile;
     // This is the prefix where the redistributed velocity fields will be printed
     std::string NewPrefix;
-    std::vector<int> InfoType;
+    //std::vector<int> InfoType;
     int Ninfo;
     std::vector<int> prec;
+    int Nprint;
+    std::vector<int> printOrder;
 
 };
 
@@ -142,17 +143,18 @@ bool readInputFile(std::string filename, inputs& input) {
             getline(datafile, line);
             std::istringstream inp(line.c_str());
             inp >> input.Ninfo;
-            for (int i = 0; i < input.Ninfo; i++){
+            inp >> input.Nprint;
+            for (int i = 0; i < input.Nprint; i++){
                 int t;
                 inp >> t;
-                input.InfoType.push_back(t);
+                input.printOrder.push_back(t);
             }
         }
 
         {// Get the precision for the floating numbers
             getline(datafile, line);
             std::istringstream inp(line.c_str());
-            for (int i = 0; i < input.Ninfo; i++) {
+            for (int i = 0; i < input.Nprint; i++) {
                 int t;
                 inp >> t;
                 input.prec.push_back(t);
@@ -237,22 +239,9 @@ bool readVelocityFiles(std::string filename, std::vector< PntVel>& points, int m
                     int ii;
                     for (int i = 0; i < input.Ninfo; i++)
                     {
-                        if (input.InfoType[i] == 0) {
-                            inp >> dd;
-                            pv.doubleInfo.push_back(dd);
-                        }
-                        else {
-                            inp >> ii;
-                            pv.intInfo.push_back(ii);
-                        }
+                        inp >> dd;
+                        pv.data.push_back(dd);
                     }
-                    //inp >> pv.vx;
-                    //inp >> pv.vy;
-                    //inp >> pv.vz;
-                    //pv.proc = proc;
-                    //inp >> proc;
-                    //inp >> pv.diam;
-                    //inp >> pv.ratio;
                     points.push_back(pv);
                 }
             }
@@ -346,6 +335,10 @@ int main(int argc, char* argv[])
     boost::mpi::environment env(argc, argv);
     boost::mpi::communicator world;
 
+    if (world.rank() == 0){
+        std::cout << "Redist version 1.2" << std::endl;
+    }
+
     //std::cout << argc << std::endl;
     //std::cout << argv[0] << std::endl;
     inputs inp;
@@ -375,18 +368,9 @@ int main(int argc, char* argv[])
     for (std::vector<PntVel>::iterator it = my_data.begin(); it != my_data.end(); ++it) {
         outstream << std::setprecision(3) << std::fixed
             << it->x << " " << it->y << " " << it->z << " " << it->proc << " ";
-            
-        int d_cnt = 0;
-        int i_cnt = 0;
-        for (int i = 0; i < inp.Ninfo; i++){
-            if (inp.InfoType[i] == 0) {
-                outstream << std::setprecision(inp.prec[i]) << std::fixed << it->doubleInfo[d_cnt] << " ";
-                d_cnt++;
-            }
-            else {
-                outstream << it->intInfo[i_cnt] << " ";
-                i_cnt++;
-            }
+
+        for (int i = 0; i < inp.Nprint; i++){
+            outstream << std::setprecision(inp.prec[i]) << std::fixed << it->data[ inp.printOrder[i] - 1 ] << " ";
         }
         outstream << std::endl;
     }
