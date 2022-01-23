@@ -25,6 +25,8 @@
 #include <boost/geometry/geometries/point_xy.hpp>
 #include <boost/geometry/geometries/polygon.hpp>
 
+#include <boost/spirit/include/qi.hpp>
+
 /**
  * PntVel is a structure that holds information for a single point.
  */
@@ -50,6 +52,61 @@ struct PntVel {
     std::vector<double> data;
 };
 
+typedef std::map<int, int> L3map;
+typedef std::map<int, L3map> L2map;
+typedef std::map<int, L2map> L1map;
+
+class cellIdList{
+public:
+    cellIdList(){};
+    bool insert(std::string cell_string);
+
+private:
+    L1map CellIds;
+    L1map::iterator itLev1;
+    L2map::iterator itLev2;
+    L3map::iterator itLev3;
+    int idx = 0;
+};
+
+bool cellIdList::insert(std::string cell_string) {
+    bool out = true;
+    std::vector<std::string> vec;
+    bool res = boost::spirit::qi::parse(cell_string.begin(), cell_string.end(),
+                                        boost::spirit::qi::as_string[*(boost::spirit::qi::char_ - ':' - "_")] %
+                                                (boost::spirit::qi::lit(':') | boost::spirit::qi::lit('_')), vec);
+
+    int a = stoi(vec[0]);
+    int b = stoi(vec[1]);
+    int c = stoi(vec[2]);
+    itLev1 = CellIds.find(a);
+    if (itLev1 != CellIds.end()){
+        itLev2 = itLev1->second.find(b);
+        if (itLev2 != itLev1->second.end()){
+            itLev3 = itLev2->second.find(c);
+            if (itLev3 != itLev2->second.end()){
+                std::cout << " The cell " << cell_string << " is already in the list" << std::endl;
+                out = false;
+            }
+            else{
+                itLev2->second.insert(std::pair<int ,int>(c, idx++));
+            }
+        }
+        else{
+            L3map tmp;
+            tmp.insert(std::pair<int,int>(c,idx++));
+            itLev1->second.insert(std::pair<int, L3map>(b, tmp));
+        }
+    }
+    else{// If the a key doesn't exist in the map
+        L3map tmp;
+        tmp.insert(std::pair<int,int>(c,idx++));
+        L2map tmp1;
+        tmp1.insert(std::pair<int, L3map >(b , tmp));
+        CellIds.insert(std::pair<int, L2map>(a, tmp1));
+    }
+    return out;
+}
 
 
 // The boost definition for 2D points
@@ -338,6 +395,11 @@ int main(int argc, char* argv[])
     if (world.rank() == 0){
         std::cout << "Redist version 1.2" << std::endl;
     }
+
+    cellIdList CL;
+    CL.insert("16_3:515");
+    CL.insert("131_3:017");
+
 
     //std::cout << argc << std::endl;
     //std::cout << argv[0] << std::endl;
