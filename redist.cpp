@@ -8,6 +8,7 @@
 #include <sstream>
 #include <vector>
 #include <map>
+#include<string>
 
 //#include <chrono>
 //#include <ctime>
@@ -52,16 +53,57 @@ struct PntVel {
     std::vector<double> data;
 };
 
-typedef std::map<int, int> L3map;
+struct cellIDint{
+    cellIDint();
+    std::string to_string();
+    cellIDint(int aa, int bb, int cc){
+        a = aa;
+        b = bb;
+        c = cc;
+    }
+    int a = -1;
+    int b = -1;
+    int c = -1;
+
+};
+std::string cellIDint::to_string(){
+    return std::to_string(a) + ":" + std::to_string(b) + "_" + std::to_string(c);
+}
+
+cellIDint cellID2int(std::string str){
+    std::vector<std::string> vec;
+    bool res = boost::spirit::qi::parse(str.begin(), str.end(),
+                                        boost::spirit::qi::as_string[*(boost::spirit::qi::char_ - ':' - "_")] %
+                                        (boost::spirit::qi::lit(':') | boost::spirit::qi::lit('_')), vec);
+    if (vec[2].empty())
+        vec[2] = "-9";
+    return cellIDint(stoi(vec[0]), stoi(vec[1]), stoi(vec[2]));
+}
+
+struct cellData{
+    std::vector<cellIDint> neighborCells;
+    std::vector<PntVel> CellVelocities;
+    std::vector<int> VelIds;
+    //std::vector<int> neighborIds;
+};
+
+typedef std::map<int, cellData> L3map;
 typedef std::map<int, L3map> L2map;
 typedef std::map<int, L2map> L1map;
 
 class cellIdList{
 public:
     cellIdList(){};
-    bool insert(std::string cell_string);
+    bool insert(std::string cell_string, cellData& CData){
+        return insert(cellID2int(cell_string), CData);
+    };
+    bool insert(cellIDint clid, cellData& CData);
 
-private:
+    bool addVelocityPoint(cellIDint clid, PntVel& pv);
+
+    bool find(cellIDint clid);
+    void clear();
+
     L1map CellIds;
     L1map::iterator itLev1;
     L2map::iterator itLev2;
@@ -69,43 +111,72 @@ private:
     int idx = 0;
 };
 
-bool cellIdList::insert(std::string cell_string) {
-    bool out = true;
-    std::vector<std::string> vec;
-    bool res = boost::spirit::qi::parse(cell_string.begin(), cell_string.end(),
-                                        boost::spirit::qi::as_string[*(boost::spirit::qi::char_ - ':' - "_")] %
-                                                (boost::spirit::qi::lit(':') | boost::spirit::qi::lit('_')), vec);
+void cellIdList::clear() {
+    CellIds.clear();
+}
 
-    int a = stoi(vec[0]);
-    int b = stoi(vec[1]);
-    int c = stoi(vec[2]);
-    itLev1 = CellIds.find(a);
+bool cellIdList::find(cellIDint clid) {
+    itLev1 = CellIds.find(clid.a);
     if (itLev1 != CellIds.end()){
-        itLev2 = itLev1->second.find(b);
+        itLev2 = itLev1->second.find(clid.b);
         if (itLev2 != itLev1->second.end()){
-            itLev3 = itLev2->second.find(c);
+            itLev3 = itLev2->second.find(clid.c);
             if (itLev3 != itLev2->second.end()){
-                std::cout << " The cell " << cell_string << " is already in the list" << std::endl;
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+bool cellIdList::insert(cellIDint clid, cellData& CData) {
+    bool out = true;
+
+    //int a = clid.a;
+    //int b = clid.b;
+    //int c = clid.c;
+    itLev1 = CellIds.find(clid.a);
+    if (itLev1 != CellIds.end()){
+        itLev2 = itLev1->second.find(clid.b);
+        if (itLev2 != itLev1->second.end()){
+            itLev3 = itLev2->second.find(clid.c);
+            if (itLev3 != itLev2->second.end()){
+                std::cout << " The cell " << clid.to_string() << " is already in the list" << std::endl;
                 out = false;
             }
             else{
-                itLev2->second.insert(std::pair<int ,int>(c, idx++));
+                itLev2->second.insert(std::pair<int ,cellData >(clid.c, CData));
             }
         }
         else{
             L3map tmp;
-            tmp.insert(std::pair<int,int>(c,idx++));
-            itLev1->second.insert(std::pair<int, L3map>(b, tmp));
+            tmp.insert(std::pair<int, cellData>(clid.c, CData));
+            itLev1->second.insert(std::pair<int, L3map>(clid.b, tmp));
         }
     }
     else{// If the a key doesn't exist in the map
         L3map tmp;
-        tmp.insert(std::pair<int,int>(c,idx++));
+        tmp.insert(std::pair<int,cellData>(clid.c, CData));
         L2map tmp1;
-        tmp1.insert(std::pair<int, L3map >(b , tmp));
-        CellIds.insert(std::pair<int, L2map>(a, tmp1));
+        tmp1.insert(std::pair<int, L3map >(clid.b , tmp));
+        CellIds.insert(std::pair<int, L2map>(clid.a, tmp1));
     }
     return out;
+}
+
+bool cellIdList::addVelocityPoint(cellIDint clid, PntVel &pv) {
+    itLev1 = CellIds.find(clid.a);
+    if (itLev1 != CellIds.end()){
+        itLev2 = itLev1->second.find(clid.b);
+        if (itLev2 != itLev1->second.end()){
+            itLev3 = itLev2->second.find(clid.c);
+            if (itLev3 != itLev2->second.end()){
+                itLev3->second.CellVelocities.push_back(pv);
+                return true;
+            }
+        }
+    }
+    return false;
 }
 
 
@@ -165,7 +236,39 @@ struct inputs {
     int Nprint;
     std::vector<int> printOrder;
 
+    bool UseGraph;
+    int overlapIter = 0;
+
 };
+
+/**
+ * This converts an integer to string with specified number of zero padding.
+ *
+ * \param i is the integer number to convert to string
+ * \param n is the number of zeros to fill in
+ * \return the integer in a string format
+ */
+std::string num2Padstr(int i, int n) {
+    std::stringstream ss;
+    ss << std::setw(n) << std::setfill('0') << i;
+    return ss.str();
+}
+
+int findProcessorOwner(double x, double y, DomainListPoly& actual, int rank){
+    if (boost::geometry::within(bpoint(x, y), actual[rank])){
+        return rank;
+    }
+    else{
+        for(unsigned int i = 0; i < actual.size(); ++i){
+            if ( i == rank)
+                continue;
+            if (boost::geometry::within(bpoint(x, y), actual[i])){
+                return i;
+            }
+        }
+    }
+    return -9;
+}
 
 /**
  * readInputFile parse the input file.
@@ -194,6 +297,15 @@ bool readInputFile(std::string filename, inputs& input) {
             inp >> input.Nzeros;
             // Ending of file name
             inp >> input.suffix;
+            // Is NPSAT graph available
+            int tmp;
+            inp >> tmp;
+            if (tmp != 0 ){
+                input.UseGraph = true;
+                inp >> tmp;
+                input.overlapIter = tmp;
+            }
+
         }
 
         {// get the information of the points
@@ -233,6 +345,260 @@ bool readInputFile(std::string filename, inputs& input) {
         datafile.close();
     }
     return outcome;
+}
+
+bool readCellGraphFiles(std::string filename, cellIdList& CLact, cellIdList& CLexp,
+                        int myrank, DomainListPoly& expanded,DomainListPoly& actual){
+    bool outcome = false;
+    std::ifstream datafile(filename.c_str());
+    if (!datafile.good()) {
+        std::cout << "Can't open the file " << filename << std::endl;
+    }
+    else{
+        std::cout << "Processor " << myrank << " reads graph file " << filename << std::endl;
+        boost::timer::cpu_timer timer;
+        std::string line;
+        double x, y;
+        int n;
+        int nAct = 0;
+        int nExp = 0;
+        int count_lines = 0;
+        std::string celidstr;
+        while (getline(datafile, line)){
+            if (line.size() > 1){
+                std::istringstream inp(line.c_str());
+                inp >> x;
+                inp >> y;
+                bool inAct = false;
+                bool inExp = false;
+                if (boost::geometry::within(bpoint(x, y), actual[myrank])){
+                    inAct = true;
+                }
+                else if (boost::geometry::within(bpoint(x, y), expanded[myrank])){
+                    inExp = true;
+                }
+                if (inExp || inAct){
+                    inp >> n;
+                    std::vector<cellIDint> neighcells;
+                    inp >> celidstr;
+                    cellData cdata;
+                    cellIDint thisCell = cellID2int(celidstr);
+                    for (int i = 0; i < n; ++i){
+                        inp >> celidstr;
+                        cdata.neighborCells.push_back(cellID2int(celidstr));
+                    }
+                    if (inAct){
+                        CLact.insert(thisCell, cdata);
+                        nAct++;
+                    }
+                    else if (inExp){
+                        CLexp.insert(thisCell,cdata);
+                        nExp++;
+                    }
+                }
+            }
+        }
+
+        boost::chrono::duration<double> seconds = boost::chrono::nanoseconds(timer.elapsed().user);
+        std::cout << ". . . .Proc " << myrank << " spend " << seconds.count() / 60 << " min to read " << nAct << " " << nExp  << std::endl;
+        outcome = true;
+    }
+    return outcome;
+
+}
+
+bool readVelocityWithGraph(std::string filename, int myRank, inputs& input, cellIdList& CLact, cellIdList& CLexp ){
+    bool outcome = false;
+    std::ifstream datafile(filename.c_str());
+    if (!datafile.good()) {
+        std::cout << "Can't open the file " << filename << std::endl;
+    }
+    else{
+        std::cout << "Processor " << myRank << " reads velocity file " << filename << std::endl;
+        boost::timer::cpu_timer timer;
+        std::string line;
+        double x, y, z;
+        int cnt_data = 0;
+        std::string celidstr;
+        while (getline(datafile, line)){
+            if (line.size() > 1){
+                std::istringstream inp(line.c_str());
+                PntVel pv;
+                pv.proc = 0;
+                inp >> pv.x;
+                inp >> pv.y;
+                inp >> pv.z;
+                double dd;
+                for (int i = 0; i < input.Ninfo; i++){
+                    inp >> dd;
+                    pv.data.push_back(dd);
+                }
+                inp >> celidstr;
+                cellIDint thisCell = cellID2int(celidstr);
+                bool tf = CLact.addVelocityPoint(thisCell, pv);
+                if (!tf){
+                    tf = CLexp.addVelocityPoint(thisCell, pv);
+                    if (tf)
+                        cnt_data++;
+                }
+                else{
+                    cnt_data++;
+                }
+            }
+        }
+
+        boost::chrono::duration<double> seconds = boost::chrono::nanoseconds(timer.elapsed().user);
+        std::cout << ". . . .Proc " << myRank << " spend " << seconds.count() / 60 << " min to insert " << cnt_data << " data" << std::endl;
+        outcome = true;
+    }
+
+}
+
+void printFilesGraph(cellIdList& CLact, inputs& input, int rank, DomainListPoly& dpoly){
+    boost::timer::cpu_timer timer;
+
+    L1map::iterator itLev1;
+    L2map::iterator itLev2;
+    L3map::iterator itLev3;
+    int idx = 0;
+    //Add ids according to the order they are going to be printed
+    for (itLev1 = CLact.CellIds.begin(); itLev1 != CLact.CellIds.end(); ++itLev1){
+        for (itLev2 = itLev1->second.begin(); itLev2 != itLev1->second.end(); ++itLev2){
+            for (itLev3 = itLev2->second.begin(); itLev3 != itLev2->second.end(); ++ itLev3){
+                for (int i = 0; i < itLev3->second.CellVelocities.size(); ++i){
+                    itLev3->second.VelIds.push_back(idx);
+                    idx++;
+                }
+            }
+        }
+    }
+    // Add and print the indices of the neighbor cells
+    std::cout << "____ Processor " << rank << " is printing Velocity and Graph files ..." << std::endl;
+    std::string graphfilename = input.NewPrefix + num2Padstr(rank, input.Nzeros) + ".grph";
+    std::ofstream graphstream;
+    graphstream.open(graphfilename.c_str());
+
+    std::string velfilename = input.NewPrefix + num2Padstr(rank, input.Nzeros) + input.suffix;
+    std::ofstream velstream;
+    velstream.open(velfilename.c_str());
+    idx = 0;
+    for (itLev1 = CLact.CellIds.begin(); itLev1 != CLact.CellIds.end(); ++itLev1){
+        for (itLev2 = itLev1->second.begin(); itLev2 != itLev1->second.end(); ++itLev2){
+            for (itLev3 = itLev2->second.begin(); itLev3 != itLev2->second.end(); ++ itLev3){
+                for (unsigned int i = 0; i < itLev3->second.VelIds.size(); ++i){
+                    int proc = findProcessorOwner(itLev3->second.CellVelocities[i].x,
+                                       itLev3->second.CellVelocities[i].y,
+                                       dpoly, rank);
+                    if (proc < 0){
+                        std::cout << "Point "
+                                << itLev3->second.CellVelocities[i].x << " "
+                                << itLev3->second.CellVelocities[i].y
+                                << " in processor polygons" << std::endl;
+                    }
+                    else{
+                        velstream << std::setprecision(3) << std::fixed
+                                  << itLev3->second.CellVelocities[i].x << " "
+                                  << itLev3->second.CellVelocities[i].y << " "
+                                  << itLev3->second.CellVelocities[i].z << " "
+                                  << proc << " ";
+                        for (unsigned int j = 0; j < input.Nprint; ++j){
+                            velstream << std::setprecision(input.prec[j]) << std::fixed
+                            << itLev3->second.CellVelocities[i].data[input.printOrder[j] - 1] << " ";
+                        }
+                        velstream << std::endl;
+                    }
+
+                    // Make a list of the ids that this velocity node depends on
+                    // Add first all the velocity nodes of the
+                    std::vector<int> tmp;
+                    for (unsigned int j = 0; j < itLev3->second.VelIds.size(); ++j){
+                        if (itLev3->second.VelIds[j] == idx)
+                            continue;
+                        tmp.push_back(itLev3->second.VelIds[j]);
+                    }
+
+                    // Add the node ids of the neighboring cells
+                    for (unsigned int j = 0; j < itLev3->second.neighborCells.size(); ++j){
+                        bool tf = CLact.find(itLev3->second.neighborCells[j]);
+                        if (tf){
+                            for (int k = 0; k < CLact.itLev3->second.VelIds.size(); ++k){
+                                tmp.push_back(CLact.itLev3->second.VelIds[k]);
+                            }
+                        }
+                    }
+                    graphstream << tmp.size() << " ";
+                    for (unsigned int j = 0; j < tmp.size(); ++j){
+                        graphstream << tmp[j] << " ";
+                    }
+                    graphstream << std::endl;
+                    idx++;
+                }
+            }
+        }
+    }
+    graphstream.close();
+    velstream.close();
+    boost::chrono::duration<double> seconds = boost::chrono::nanoseconds(timer.elapsed().user);
+    std::cout << ". . . .Proc " << rank << " spend " << seconds.count() / 60 << " min to print " << idx << " data" << std::endl;
+
+}
+
+void appendNeighborCells(cellIdList& CLact, cellIdList& CLexp, inputs& input){
+    L1map::iterator itLev1;
+    L2map::iterator itLev2;
+    L3map::iterator itLev3;
+    bool foundCell;
+    cellIdList CLextra;
+    for (int i = 0; i < input.overlapIter; ++i){
+        CLextra.clear();
+        for (itLev1 = CLact.CellIds.begin(); itLev1 != CLact.CellIds.end(); ++itLev1){
+            for (itLev2 = itLev1->second.begin(); itLev2 != itLev1->second.end(); ++itLev2){
+                for (itLev3 = itLev2->second.begin(); itLev3 != itLev2->second.end(); ++ itLev3){
+                    for (int j = 0; j < itLev3->second.neighborCells.size(); ++j){
+                        foundCell = CLact.find(itLev3->second.neighborCells[j]);
+                        if (!foundCell){
+                            foundCell = CLextra.find(itLev3->second.neighborCells[j]);
+                            if (!foundCell){
+                                foundCell = CLexp.find(itLev3->second.neighborCells[j]);
+                                if (foundCell){
+                                    CLextra.insert(itLev3->second.neighborCells[j], CLexp.itLev3->second);
+                                }
+                                //else{
+                                //    std::cout << itLev3->second.neighborCells[j].to_string() << " Not found anywhere" << std::endl;
+                                //}
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        for (itLev1 = CLextra.CellIds.begin(); itLev1 != CLextra.CellIds.end(); ++itLev1){
+            for (itLev2 = itLev1->second.begin(); itLev2 != itLev1->second.end(); ++itLev2){
+                for (itLev3 = itLev2->second.begin(); itLev3 != itLev2->second.end(); ++ itLev3){
+                    CLact.insert(cellIDint(itLev1->first,itLev2->first, itLev3->first), itLev3->second);
+                }
+            }
+        }
+    }
+
+    /*
+    std::string outfile = "tmp.dat";
+    std::ofstream outstream;
+    outstream.open(outfile.c_str());
+    for (itLev1 = CLact.CellIds.begin(); itLev1 != CLact.CellIds.end(); ++itLev1){
+        for (itLev2 = itLev1->second.begin(); itLev2 != itLev1->second.end(); ++itLev2){
+            for (itLev3 = itLev2->second.begin(); itLev3 != itLev2->second.end(); ++ itLev3){
+                for (int i = 0; i < itLev3->second.CellVelocities.size(); ++i){
+                    outstream << itLev3->second.CellVelocities[i].x << " "
+                              << itLev3->second.CellVelocities[i].y << " "
+                              << itLev3->second.CellVelocities[i].z << std::endl;
+                }
+            }
+        }
+    }
+    outstream.close();
+    */
 }
 
 /**
@@ -315,6 +681,8 @@ bool readVelocityFiles(std::string filename, std::vector< PntVel>& points, int m
 
 }
 
+
+
 /**
  * Reads the 2D polygons that define the new subdomains.
  * 
@@ -374,18 +742,7 @@ bool readDomain(std::string filename, DomainListPoly& dpoly) {
     return outcome;
 }
 
-/**
- * This converts an integer to string with specified number of zero padding.
- * 
- * \param i is the integer number to convert to string
- * \param n is the number of zeros to fill in
- * \return the integer in a string format
- */
-std::string num2Padstr(int i, int n) {
-    std::stringstream ss;
-    ss << std::setw(n) << std::setfill('0') << i;
-    return ss.str();
-}
+
 
 int main(int argc, char* argv[])
 {
@@ -395,10 +752,6 @@ int main(int argc, char* argv[])
     if (world.rank() == 0){
         std::cout << "Redist version 1.2" << std::endl;
     }
-
-    cellIdList CL;
-    CL.insert("16_3:515");
-    CL.insert("131_3:017");
 
 
     //std::cout << argc << std::endl;
@@ -417,26 +770,45 @@ int main(int argc, char* argv[])
     if (!tf)
         return 0;
 
-    std::vector< PntVel> my_data;
-    for (int iproc = 0; iproc < inp.NinitDom; ++iproc) {
-        std::string filename = inp.prefix + num2Padstr(iproc, inp.Nzeros) + inp.suffix;
-        tf = readVelocityFiles(filename, my_data, world.rank(), expandedDom, actualDom, inp);
-    }
-
-    std::cout << "____ Processor " << world.rank() << " is printing..." << std::endl;
-    std::string outfilename = inp.NewPrefix + num2Padstr(world.rank(), inp.Nzeros) + inp.suffix;
-    std::ofstream outstream;
-    outstream.open(outfilename.c_str());
-    for (std::vector<PntVel>::iterator it = my_data.begin(); it != my_data.end(); ++it) {
-        outstream << std::setprecision(3) << std::fixed
-            << it->x << " " << it->y << " " << it->z << " " << it->proc << " ";
-
-        for (int i = 0; i < inp.Nprint; i++){
-            outstream << std::setprecision(inp.prec[i]) << std::fixed << it->data[ inp.printOrder[i] - 1 ] << " ";
+    if (inp.UseGraph){
+        cellIdList CLactual;
+        cellIdList CLbuffer;
+        for (int iproc = 0; iproc < inp.NinitDom; ++iproc) {
+            std::string filename = inp.prefix + num2Padstr(iproc, inp.Nzeros) + ".grph";
+            tf = readCellGraphFiles(filename, CLactual, CLbuffer,
+                                    world.rank(), expandedDom, actualDom);
+            std::string filename1 = inp.prefix + num2Padstr(iproc, inp.Nzeros) + inp.suffix;
+            tf = readVelocityWithGraph(filename1, world.rank(), inp, CLactual, CLbuffer);
         }
-        outstream << std::endl;
+        appendNeighborCells(CLactual, CLbuffer, inp);
+        printFilesGraph(CLactual, inp, world.rank(), actualDom);
     }
-    outstream.close();
+    else{
+        std::vector< PntVel> my_data;
+        for (int iproc = 0; iproc < inp.NinitDom; ++iproc) {
+            std::string filename = inp.prefix + num2Padstr(iproc, inp.Nzeros) + inp.suffix;
+            tf = readVelocityFiles(filename, my_data, world.rank(), expandedDom, actualDom, inp);
+        }
+
+        std::cout << "____ Processor " << world.rank() << " is printing..." << std::endl;
+        std::string outfilename = inp.NewPrefix + num2Padstr(world.rank(), inp.Nzeros) + inp.suffix;
+        std::ofstream outstream;
+        outstream.open(outfilename.c_str());
+        for (std::vector<PntVel>::iterator it = my_data.begin(); it != my_data.end(); ++it) {
+            outstream << std::setprecision(3) << std::fixed
+                      << it->x << " " << it->y << " " << it->z << " " << it->proc << " ";
+
+            for (int i = 0; i < inp.Nprint; i++){
+                outstream << std::setprecision(inp.prec[i]) << std::fixed << it->data[ inp.printOrder[i] - 1 ] << " ";
+            }
+            outstream << std::endl;
+        }
+        outstream.close();
+    }
+
+
+
+
     world.barrier();
     return 0;
 }

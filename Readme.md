@@ -16,7 +16,7 @@ How to use
 ---
 First prepare an input file with the following format
 ```
-Nproc prefix leadingZeros suffix
+Nproc prefix leadingZeros suffix useGraph iter
 Ndata NprintData Col1 Col2 ...
 Ndigit1 Ndigit2 Ndigit3 ...
 ActualDomain ExpandedDomain
@@ -28,6 +28,8 @@ where
 `prefix` is the prefix of the velocity file names </br>
 `leadingZeros` is the number of zero padding in the velocity file name </br>
 `suffix` is the file extension </br>
+`useGraph` if this is 1 will read the graph files</br>
+`iter` THis is the number of iterations for the buffer zone. A value of 2 is a good choice. It is used only if `useGraph = 1`</br> 
 `Ndata` is the number of data in the velocity files without the `x,y,z` coordinates </br>
 `NprintData` is the number of data to print. This number equal or less than ` Ndata` </br>
 `Col1 Col2 ...` are the column indices of the Ndata in the order that should be printed </br>
@@ -44,7 +46,16 @@ For example</br>
 example1_actual_dom.dat example1_expanded_dom.dat
 examp1e1_new_
 ```
-For the above input file the FEM simulation was carried out on 4 processors.</br>
+or
+```
+6 output2/TuleRiver2_ 4 .vel 1 2
+6 5 5 6 1 2 3 
+2 2 6 6 6
+Tule_actual_dom.dat Tule_extended_dom.dat
+output2/TuleRiver2new_
+```
+
+For the first input file the FEM simulation was carried out on 4 processors.</br>
 The second line indicates that the initial files contain 6 columns of data but only 5 of them will be printed. The columns 5 and 6 will be printed with 2 decimal digits and the columns 1 2 3 with 6 decimal digits. 
 
 
@@ -55,5 +66,3 @@ Then run the code using as many cores as the number of polygons in the actual an
 cd Example_data
 C:\"Program Files\Microsoft MPI"\Bin\mpiexec.exe -n 4 ..\Debug\redist.exe example1_input.txt
 ```
-The above assumes that the redist executable and the input files are all in the same folder.
-
