@@ -28,6 +28,7 @@
 
 #include <boost/spirit/include/qi.hpp>
 
+int dgbRank = 0;
 /**
  * PntVel is a structure that holds information for a single point.
  */
@@ -75,9 +76,17 @@ cellIDint cellID2int(std::string str){
     bool res = boost::spirit::qi::parse(str.begin(), str.end(),
                                         boost::spirit::qi::as_string[*(boost::spirit::qi::char_ - ':' - "_")] %
                                         (boost::spirit::qi::lit(':') | boost::spirit::qi::lit('_')), vec);
-    if (vec[2].empty())
-        vec[2] = "-9";
-    return cellIDint(stoi(vec[0]), stoi(vec[1]), stoi(vec[2]));
+    int a, b, c;
+    a = stoi(vec[0]);
+    b = stoi(vec[1]);
+    if (b == 0){
+        c = -9;
+    }
+    else{
+        c = stoi(vec[2]);
+    }
+
+    return cellIDint(a, b, c);
 }
 
 struct cellData{
@@ -359,6 +368,9 @@ bool readCellGraphFiles(std::string filename, cellIdList& CLact, cellIdList& CLe
         std::cout << "Can't open the file " << filename << std::endl;
     }
     else{
+        //if (myrank == dgbRank){
+        //    std::cout << "Start HERE " << filename <<  std::endl;
+        //}
         std::cout << "Processor " << myrank << " reads graph file " << filename << std::endl;
         boost::timer::cpu_timer timer;
         std::string line;
@@ -408,6 +420,10 @@ bool readCellGraphFiles(std::string filename, cellIdList& CLact, cellIdList& CLe
             }
         }
 
+        //if (myrank == dgbRank){
+        //    std::cout << "End HERE " << filename <<  std::endl;
+        //}
+
         boost::chrono::duration<double> seconds = boost::chrono::nanoseconds(timer.elapsed().user);
         std::cout << ". . . .Proc " << myrank << " spend " << seconds.count() / 60 << " min to read " << nAct << " " << nExp  << std::endl;
         outcome = true;
@@ -416,21 +432,31 @@ bool readCellGraphFiles(std::string filename, cellIdList& CLact, cellIdList& CLe
 
 }
 
-bool readVelocityWithGraph(std::string filename, int myRank, inputs& input, cellIdList& CLact, cellIdList& CLexp ){
+bool readVelocityWithGraph(std::string filename, int myRank, inputs& input, cellIdList& CLact/*, cellIdList& CLexp*/ ){
     bool outcome = false;
     std::ifstream datafile(filename.c_str());
     if (!datafile.good()) {
         std::cout << "Can't open the file " << filename << std::endl;
+        return outcome;
     }
     else{
+        //if (myRank == dgbRank){
+        //    std::cout << "Start HERE " << filename <<  std::endl;
+        //}
         std::cout << "Processor " << myRank << " reads velocity file " << filename << std::endl;
         boost::timer::cpu_timer timer;
         std::string line;
         double x, y, z;
         int cnt_data = 0;
         std::string celidstr;
+        int cnt_lines = 0;
         while (getline(datafile, line)){
             if (line.size() > 1){
+                //if (myRank == dgbRank){
+                //std::cout << cnt_lines++ << std::endl;
+                //std:: cout << line << std::endl;
+                //}
+
                 std::istringstream inp(line.c_str());
                 PntVel pv;
                 pv.proc = 0;
@@ -445,22 +471,27 @@ bool readVelocityWithGraph(std::string filename, int myRank, inputs& input, cell
                 inp >> celidstr;
                 cellIDint thisCell = cellID2int(celidstr);
                 bool tf = CLact.addVelocityPoint(thisCell, pv);
-                if (!tf){
-                    tf = CLexp.addVelocityPoint(thisCell, pv);
-                    if (tf)
-                        cnt_data++;
-                }
-                else{
-                    cnt_data++;
-                }
+                if (tf) {cnt_data++;}
+                //if (!tf){
+                //    tf = CLexp.addVelocityPoint(thisCell, pv);
+                //    if (tf)
+                //        cnt_data++;
+                //}
+                //else{
+                //    cnt_data++;
+                //}
             }
         }
+
+        //if (myRank == dgbRank){
+        //    std::cout << "Start HERE" << filename <<  std::endl;
+        //}
 
         boost::chrono::duration<double> seconds = boost::chrono::nanoseconds(timer.elapsed().user);
         std::cout << ". . . .Proc " << myRank << " spend " << seconds.count() / 60 << " min to insert " << cnt_data << " data" << std::endl;
         outcome = true;
     }
-
+    return outcome;
 }
 
 void printFilesGraphV2(cellIdList& CLact, inputs& input, int rank, DomainListPoly& dpoly){
@@ -523,18 +554,22 @@ void printFilesGraphV2(cellIdList& CLact, inputs& input, int rank, DomainListPol
                     }
                 }
 
+                std::vector<int> tmp;
+                for(unsigned int i = 0; i < itLev3->second.neighborCells.size(); ++i){
+                    bool tf = CLact.find(itLev3->second.neighborCells[i]);
+                    if (tf){
+                        tmp.push_back(CLact.itLev3->second.id);
+                    }
+                }
                 // Print the cell graph
                 graphstream << std::setprecision(3) << std::fixed
                             << itLev3->second.x << " "
                             << itLev3->second.y << " "
                             << itLev3->second.z << " "
-                            << itLev3->second.neighborCells.size() << " "
+                            << tmp.size() << " "
                             << itLev3->second.CellVelocities.size() << " ";
-                for(unsigned int i = 0; i < itLev3->second.neighborCells.size(); ++i){
-                    bool tf = CLact.find(itLev3->second.neighborCells[i]);
-                    if (tf){
-                        graphstream << CLact.itLev3->second.id << " ";
-                    }
+                for(unsigned int i = 0; i < tmp.size(); ++i){
+                    graphstream << tmp[i] << " ";
                 }
                 for (unsigned int i = 0; i < itLev3->second.VelIds.size(); ++i){
                     graphstream << itLev3->second.VelIds[i] << " ";
@@ -774,7 +809,6 @@ bool readVelocityFiles(std::string filename, std::vector< PntVel>& points, int m
         outcome = true;
     }
     return outcome;
-
 }
 
 
@@ -845,10 +879,13 @@ int main(int argc, char* argv[])
     boost::mpi::environment env(argc, argv);
     boost::mpi::communicator world;
 
-    if (world.rank() == 0){
+    //if (world.rank() == 0){
         std::cout << "Redist version 1.2" << std::endl;
-    }
+    //}
 
+    //int DomainId = std::stoi(argv[2]);
+    int DomainId = world.rank();
+    //std::cout << DomainId << std::endl;
 
     //std::cout << argc << std::endl;
     //std::cout << argv[0] << std::endl;
@@ -858,6 +895,7 @@ int main(int argc, char* argv[])
     if (!tf)
         return 0;
 
+
     DomainListPoly actualDom, expandedDom;
     tf = readDomain(inp.ActualDomainFile, actualDom);
     if (!tf)
@@ -866,28 +904,34 @@ int main(int argc, char* argv[])
     if (!tf)
         return 0;
 
+
     if (inp.UseGraph){
         cellIdList CLactual;
         cellIdList CLbuffer;
         for (int iproc = 0; iproc < inp.NinitDom; ++iproc) {
             std::string filename = inp.prefix + num2Padstr(iproc, inp.Nzeros) + ".grph";
             tf = readCellGraphFiles(filename, CLactual, CLbuffer,
-                                    world.rank(), expandedDom, actualDom);
-            std::string filename1 = inp.prefix + num2Padstr(iproc, inp.Nzeros) + inp.suffix;
-            tf = readVelocityWithGraph(filename1, world.rank(), inp, CLactual, CLbuffer);
+                                    DomainId, expandedDom, actualDom);
         }
+        world.barrier();
         appendNeighborCells(CLactual, CLbuffer, inp);
-        printFilesGraphV2(CLactual, inp, world.rank(), actualDom);
+        world.barrier();
+        for (int iproc = 0; iproc < inp.NinitDom; ++iproc){
+            std::string filename1 = inp.prefix + num2Padstr(iproc, inp.Nzeros) + inp.suffix;
+            tf = readVelocityWithGraph(filename1, DomainId, inp, CLactual);
+        }
+        world.barrier();
+        printFilesGraphV2(CLactual, inp, DomainId, actualDom);
     }
     else{
         std::vector< PntVel> my_data;
         for (int iproc = 0; iproc < inp.NinitDom; ++iproc) {
             std::string filename = inp.prefix + num2Padstr(iproc, inp.Nzeros) + inp.suffix;
-            tf = readVelocityFiles(filename, my_data, world.rank(), expandedDom, actualDom, inp);
+            tf = readVelocityFiles(filename, my_data, DomainId, expandedDom, actualDom, inp);
         }
 
-        std::cout << "____ Processor " << world.rank() << " is printing..." << std::endl;
-        std::string outfilename = inp.NewPrefix + num2Padstr(world.rank(), inp.Nzeros) + inp.suffix;
+        std::cout << "____ Processor " << DomainId << " is printing..." << std::endl;
+        std::string outfilename = inp.NewPrefix + num2Padstr(DomainId, inp.Nzeros) + inp.suffix;
         std::ofstream outstream;
         outstream.open(outfilename.c_str());
         for (std::vector<PntVel>::iterator it = my_data.begin(); it != my_data.end(); ++it) {
@@ -901,6 +945,9 @@ int main(int argc, char* argv[])
         }
         outstream.close();
     }
+
+
+
 
 
 
