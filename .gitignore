@@ -366,4 +366,6 @@ MigrationBackup/
 
 *.idea
 *.vscode
-*cmake-build-debug
+*cmake-build-debugcmake-build-release/
+cmake-build-release/
+cmake-build-debug/
