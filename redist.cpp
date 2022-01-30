@@ -84,6 +84,10 @@ struct cellData{
     std::vector<cellIDint> neighborCells;
     std::vector<PntVel> CellVelocities;
     std::vector<int> VelIds;
+    double x;
+    double y;
+    double z;
+    int id;
     //std::vector<int> neighborIds;
 };
 
@@ -358,7 +362,7 @@ bool readCellGraphFiles(std::string filename, cellIdList& CLact, cellIdList& CLe
         std::cout << "Processor " << myrank << " reads graph file " << filename << std::endl;
         boost::timer::cpu_timer timer;
         std::string line;
-        double x, y;
+        double x, y, z;
         int n;
         int nAct = 0;
         int nExp = 0;
@@ -369,6 +373,7 @@ bool readCellGraphFiles(std::string filename, cellIdList& CLact, cellIdList& CLe
                 std::istringstream inp(line.c_str());
                 inp >> x;
                 inp >> y;
+                inp >> z;
                 bool inAct = false;
                 bool inExp = false;
                 if (boost::geometry::within(bpoint(x, y), actual[myrank])){
@@ -382,6 +387,10 @@ bool readCellGraphFiles(std::string filename, cellIdList& CLact, cellIdList& CLe
                     std::vector<cellIDint> neighcells;
                     inp >> celidstr;
                     cellData cdata;
+                    cdata.x = x;
+                    cdata.y = y;
+                    cdata.z = z;
+
                     cellIDint thisCell = cellID2int(celidstr);
                     for (int i = 0; i < n; ++i){
                         inp >> celidstr;
@@ -454,6 +463,93 @@ bool readVelocityWithGraph(std::string filename, int myRank, inputs& input, cell
 
 }
 
+void printFilesGraphV2(cellIdList& CLact, inputs& input, int rank, DomainListPoly& dpoly){
+    boost::timer::cpu_timer timer;
+    L1map::iterator itLev1;
+    L2map::iterator itLev2;
+    L3map::iterator itLev3;
+    int cellIdx = 0;
+    int velIdx = 0;
+
+    // Add ids to the cells and the velocity points according to the order they are going to be printed
+    for (itLev1 = CLact.CellIds.begin(); itLev1 != CLact.CellIds.end(); ++itLev1){
+        for (itLev2 = itLev1->second.begin(); itLev2 != itLev1->second.end(); ++itLev2){
+            for (itLev3 = itLev2->second.begin(); itLev3 != itLev2->second.end(); ++ itLev3){
+                itLev3->second.id = cellIdx;
+                cellIdx++;
+                for (int i = 0; i < itLev3->second.CellVelocities.size(); ++i){
+                    itLev3->second.VelIds.push_back(velIdx);
+                    velIdx++;
+                }
+            }
+        }
+    }
+
+    // Print the velocity and the Cell graph files
+    std::cout << "____ Processor " << rank << " is printing Velocity and Graph files ..." << std::endl;
+    std::string graphfilename = input.NewPrefix + num2Padstr(rank, input.Nzeros) + ".grph";
+    std::ofstream graphstream;
+    graphstream.open(graphfilename.c_str());
+
+    std::string velfilename = input.NewPrefix + num2Padstr(rank, input.Nzeros) + input.suffix;
+    std::ofstream velstream;
+    velstream.open(velfilename.c_str());
+
+    for (itLev1 = CLact.CellIds.begin(); itLev1 != CLact.CellIds.end(); ++itLev1){
+        for (itLev2 = itLev1->second.begin(); itLev2 != itLev1->second.end(); ++itLev2){
+            for (itLev3 = itLev2->second.begin(); itLev3 != itLev2->second.end(); ++ itLev3){
+                // Print the velocities
+                for (unsigned int i = 0; i < itLev3->second.VelIds.size(); ++i){
+                    int proc = findProcessorOwner(itLev3->second.CellVelocities[i].x,
+                                                  itLev3->second.CellVelocities[i].y,
+                                                  dpoly, rank);
+                    if (proc < 0){
+                        std::cout << "Point "
+                                  << itLev3->second.CellVelocities[i].x << " "
+                                  << itLev3->second.CellVelocities[i].y
+                                  << " is not in any processor polygons" << std::endl;
+                    }
+                    else{
+                        velstream << std::setprecision(3) << std::fixed
+                                  << itLev3->second.CellVelocities[i].x << " "
+                                  << itLev3->second.CellVelocities[i].y << " "
+                                  << itLev3->second.CellVelocities[i].z << " "
+                                  << proc << " ";
+                        for (unsigned int j = 0; j < input.Nprint; ++j){
+                            velstream << std::setprecision(input.prec[j]) << std::fixed
+                                      << itLev3->second.CellVelocities[i].data[input.printOrder[j] - 1] << " ";
+                        }
+                        velstream << std::endl;
+                    }
+                }
+
+                // Print the cell graph
+                graphstream << std::setprecision(3) << std::fixed
+                            << itLev3->second.x << " "
+                            << itLev3->second.y << " "
+                            << itLev3->second.z << " "
+                            << itLev3->second.neighborCells.size() << " "
+                            << itLev3->second.CellVelocities.size() << " ";
+                for(unsigned int i = 0; i < itLev3->second.neighborCells.size(); ++i){
+                    bool tf = CLact.find(itLev3->second.neighborCells[i]);
+                    if (tf){
+                        graphstream << CLact.itLev3->second.id << " ";
+                    }
+                }
+                for (unsigned int i = 0; i < itLev3->second.VelIds.size(); ++i){
+                    graphstream << itLev3->second.VelIds[i] << " ";
+                }
+                graphstream << std::endl;
+            }
+        }
+    }
+    graphstream.close();
+    velstream.close();
+    boost::chrono::duration<double> seconds = boost::chrono::nanoseconds(timer.elapsed().user);
+    std::cout << ". . . .Proc " << rank << " spend " << seconds.count() / 60 << " min to print "
+              << cellIdx << " cells and " << velIdx << " velocity points" << std::endl;
+}
+
 void printFilesGraph(cellIdList& CLact, inputs& input, int rank, DomainListPoly& dpoly){
     boost::timer::cpu_timer timer;
 
@@ -493,7 +589,7 @@ void printFilesGraph(cellIdList& CLact, inputs& input, int rank, DomainListPoly&
                         std::cout << "Point "
                                 << itLev3->second.CellVelocities[i].x << " "
                                 << itLev3->second.CellVelocities[i].y
-                                << " in processor polygons" << std::endl;
+                                << " is not in any processor polygons" << std::endl;
                     }
                     else{
                         velstream << std::setprecision(3) << std::fixed
@@ -781,7 +877,7 @@ int main(int argc, char* argv[])
             tf = readVelocityWithGraph(filename1, world.rank(), inp, CLactual, CLbuffer);
         }
         appendNeighborCells(CLactual, CLbuffer, inp);
-        printFilesGraph(CLactual, inp, world.rank(), actualDom);
+        printFilesGraphV2(CLactual, inp, world.rank(), actualDom);
     }
     else{
         std::vector< PntVel> my_data;
