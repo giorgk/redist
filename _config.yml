@@ -1,4 +1,4 @@
-#markdown: kramdown
+markdown: kramdown
 title: redist
 logo: /Example_data/dofs_example1_v2.png
 description: Redistribute dofs
