@@ -55,7 +55,7 @@ contain spaces.
 The input file has exactly five logical lines:
 
 ```text
-Nproc prefix leadingZeros suffix [useGraph [iter]] [inputFormat [outputSuffix]]
+Nproc prefix leadingZeros suffix [useGraph [iter]] [inputFormat [outputFormat | outputSuffix [outputFormat]]]
 Ndata NprintData Col1 Col2 ...
 Ndigit1 Ndigit2 ...
 ActualDomain ExpandedDomain
@@ -64,12 +64,13 @@ NewPrefix
 
 The brackets above indicate optional fields; do not type the brackets. When
 specifying `inputFormat`, also specify `useGraph`. When `useGraph` is nonzero,
-`iter` is required and comes before `inputFormat`.
+`iter` is required and comes before `inputFormat`. `outputFormat` can be
+supplied directly after `inputFormat`, or after an explicit `outputSuffix`.
 
 ### Line 1: source files, graph mode, and input format
 
 ```text
-Nproc prefix leadingZeros suffix [useGraph [iter]] [inputFormat [outputSuffix]]
+Nproc prefix leadingZeros suffix [useGraph [iter]] [inputFormat [outputFormat | outputSuffix [outputFormat]]]
 ```
 
 | Option | Required | Meaning |
@@ -80,8 +81,9 @@ Nproc prefix leadingZeros suffix [useGraph [iter]] [inputFormat [outputSuffix]]
 | `suffix` | Yes | Source velocity suffix, such as `.vel` for ASCII or `.vel.bin` for binary. The velocity filename is `prefix + padded-rank + suffix`. |
 | `useGraph` | No | `0` disables graph processing; any nonzero integer enables it. If omitted, graph processing is disabled for compatibility with old four-field files. |
 | `iter` | Required when `useGraph != 0` | Number of cell-neighbor expansion passes used to build the overlap. `2` is a common choice. Do not supply it when graph processing is disabled. |
-| `inputFormat` | No | `ascii`, `binary`, or `auto` (case-insensitive). The default is `auto`: a suffix ending in `.bin` selects binary; every other suffix selects ASCII. This option controls input only. |
-| `outputSuffix` | No | Suffix for redistributed velocity files. If omitted, ASCII input reuses `suffix`; binary input removes a final `.bin` (`.vel.bin` becomes `.vel`). Output is currently always ASCII, regardless of this name. |
+| `inputFormat` | No | `ascii`, `binary`, or `auto` (case-insensitive). The default is `auto`: a suffix ending in `.bin` selects binary; every other suffix selects ASCII. This controls only the source reader. |
+| `outputSuffix` | No | Suffix for redistributed velocity files. It must appear before `outputFormat` when both are supplied. With ASCII output, the default reuses `suffix` and removes a final `.bin` from binary input. With binary output, the default reuses `suffix` and appends `.bin` if needed. An explicit suffix is used exactly as written. |
+| `outputFormat` | No | `ascii` or `binary` (case-insensitive). The default is `ascii`, preserving legacy behavior. If this token immediately follows `inputFormat`, the suffix is derived automatically. Input and output formats are independent. |
 
 Examples of valid first lines:
 
@@ -95,20 +97,27 @@ Examples of valid first lines:
 # New NPSAT ASCII export
 8 output/model_4redist_ 4 .vel 1 2 ascii
 
-# New NPSAT binary export; output defaults to .vel
+# New NPSAT binary input; default ASCII output uses .vel
 8 output/model_4redist_ 4 .vel.bin 1 2 binary
 
-# Binary input selected from .bin and an explicit output suffix
+# Binary input selected from .bin with an explicit ASCII output suffix
 8 output/model_4redist_ 4 .vel.bin 1 2 auto .ich
 
 # Binary velocity input without graph processing
 8 output/model_4redist_ 4 .vel.bin 0 binary
+
+# Binary input and binary output; output suffix derives as .vel.bin
+8 output/model_4redist_ 4 .vel.bin 1 2 binary binary
+
+# ASCII input, explicit binary output suffix, and binary output
+8 output/model_4redist_ 4 .vel 1 2 ascii .ich.bin binary
 ```
 
 The `#` descriptions in this example are explanatory only. Do not put them in
 an actual configuration file.
 
-When graph mode is enabled, graph names are derived independently of `suffix`:
+When graph mode is enabled, source graph names are derived from `inputFormat`
+independently of `suffix`:
 
 - ASCII: `prefix + padded-rank + .grph`
 - Binary: `prefix + padded-rank + .grph.bin`
@@ -156,8 +165,10 @@ Ndigit1 Ndigit2 ...
 ```
 
 Provide exactly `NprintData` integers. Each value is the number of digits after
-the decimal point for the corresponding selected output value. The order
-matches the selected columns on line 2, not their original source order.
+the decimal point for the corresponding selected ASCII output value. The order
+matches the selected columns on line 2, not their original source order. This
+line is still required for binary output, but binary values are stored as raw
+64-bit doubles and are not rounded to these precisions.
 
 For example, with `6 5 5 6 1 2 3` on line 2:
 
@@ -166,8 +177,9 @@ For example, with `6 5 5 6 1 2 3` on line 2:
 ```
 
 the diameter and ratio use two decimal places, and the three velocity
-components use six. Coordinates are currently written in fixed notation with
-three decimal places; that precision is not configurable.
+components use six. ASCII coordinates are currently written in fixed notation
+with three decimal places; that precision is not configurable. Binary
+coordinates retain their full double precision.
 
 ### Line 4: actual and expanded domain files
 
@@ -213,10 +225,11 @@ Velocity output names are:
 NewPrefix + padded-new-rank + outputSuffix
 ```
 
-When graph mode is enabled, graph output names are:
+When graph mode is enabled, graph output names are selected by `outputFormat`:
 
 ```text
-NewPrefix + padded-new-rank + .grph
+ASCII:  NewPrefix + padded-new-rank + .grph
+Binary: NewPrefix + padded-new-rank + .grph.bin
 ```
 
 ## Source file formats
@@ -260,9 +273,9 @@ original processor count before reading records. It accepts velocity exports
 with either one or eight points per cell and either coarse-face or fine-face
 velocity calculation mode.
 
-Use `.vel.bin` velocity files and the matching `.grph.bin` files. Binary input
-does not change the output encoding: the redistributed Ichnos velocity and
-graph files are ASCII.
+Use `.vel.bin` velocity files and the matching `.grph.bin` files. Input and
+output encodings are independent: binary NPSAT input can be redistributed to
+either ASCII or binary Ichnos files.
 
 ## Graph and no-graph processing
 
@@ -286,7 +299,13 @@ read or produced, and `iter` is not used.
 
 ## Redistributed Ichnos output
 
-Every velocity row is ASCII:
+`outputFormat` controls both the velocity encoding and, when graph mode is
+enabled, the graph encoding. The two files of one rank always use the same
+encoding.
+
+### ASCII output
+
+Every velocity row is:
 
 ```text
 x y z new_owner_rank selected_data_1 selected_data_2 ...
@@ -298,7 +317,7 @@ With the usual line-2 selection `6 5 5 6 1 2 3`, the row is:
 x y z new_owner_rank diameter ratio vx vy vz
 ```
 
-In graph mode, every graph row is ASCII:
+In graph mode, every graph row is:
 
 ```text
 cell_x cell_y cell_z neighbor_cell_count velocity_point_count neighbor_cell_indices... velocity_point_indices...
@@ -306,6 +325,69 @@ cell_x cell_y cell_z neighbor_cell_count velocity_point_count neighbor_cell_indi
 
 Cell and velocity indices are zero-based and local to that redistributed rank's
 output files.
+
+### Binary output, version 1
+
+Binary output uses fixed-width integer fields and 64-bit `double` values. The
+current x86/x64 implementation writes native little-endian byte order. Strings,
+separators, and per-record padding are not written. The magic includes its
+trailing null byte.
+
+#### Velocity file
+
+The velocity magic is the eight bytes `RDIVEL1\0`. The header is:
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| magic | `char[8]` | `RDIVEL1\0` |
+| version | `uint32` | `1` |
+| dimension | `uint32` | `3` |
+| output rank | `uint32` | New redist/Ichnos rank represented by this file |
+| output MPI size | `uint32` | Number of ranks used to run redist |
+| data-column count | `uint32` | `NprintData` |
+| point count | `uint64` | Number of velocity records in the file |
+| source column IDs | `uint32[NprintData]` | The one-based `Col1 Col2 ...` values from configuration line 2 |
+
+Exactly `point count` records follow. Each record is:
+
+| Field | Type |
+| --- | --- |
+| `x`, `y`, `z` | three `double` values |
+| new owner rank | `int32` |
+| selected data | `double[NprintData]` in configured output order |
+
+The source-column metadata makes the common sequence `5 6 1 2 3`
+self-describing as `diameter ratio vx vy vz`. Binary values retain full double
+precision; line-3 decimal settings apply only to ASCII output.
+
+#### Graph file
+
+The graph magic is the eight bytes `RDIGRP1\0`. The header is:
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| magic | `char[8]` | `RDIGRP1\0` |
+| version | `uint32` | `1` |
+| dimension | `uint32` | `3` |
+| output rank | `uint32` | New redist/Ichnos rank represented by this file |
+| output MPI size | `uint32` | Number of ranks used to run redist |
+| cell count | `uint64` | Number of graph records |
+| velocity-point count | `uint64` | Number of records in the matching binary velocity file |
+
+Exactly `cell count` variable-length records follow. Each record is:
+
+| Field | Type |
+| --- | --- |
+| cell-center `x`, `y`, `z` | three `double` values |
+| neighbor count | `uint32` |
+| cell velocity-point count | `uint32` |
+| neighbor cell IDs | `uint64[neighbor count]` |
+| velocity-point IDs | `uint64[cell velocity-point count]` |
+
+Cell and velocity IDs are zero-based local indices. In binary graph mode,
+points outside every actual polygon are excluded before IDs and counts are
+assigned, so all graph velocity references address records that exist in the
+matching velocity file.
 
 ## Complete examples
 
@@ -332,10 +414,10 @@ Tule_actual_dom.dat Tule_extended_dom.dat
 output2/TuleRiver2new_
 ```
 
-### New NPSAT binary export with graph files
+### New NPSAT binary input and binary Ichnos output with graph files
 
 ```text
-8 output/model_4redist_ 4 .vel.bin 1 2 binary
+8 output/model_4redist_ 4 .vel.bin 1 2 binary binary
 6 5 5 6 1 2 3
 2 2 6 6 6
 domains/model_actual.dat domains/model_expanded.dat
@@ -349,11 +431,11 @@ output/model_4redist_0000.vel.bin
 output/model_4redist_0000.grph.bin
 ```
 
-For new rank 0, it writes ASCII files:
+For new rank 0, it writes binary files:
 
 ```text
-ichnos/model_0000.vel
-ichnos/model_0000.grph
+ichnos/model_0000.vel.bin
+ichnos/model_0000.grph.bin
 ```
 
 ## Compatibility and practical notes
@@ -362,8 +444,12 @@ ichnos/model_0000.grph
   valid.
 - Both previous NPSAT ASCII files and current NPSAT ASCII/binary `4redist`
   files are supported.
-- Binary is currently an input format only; redistributed Ichnos files are
-  ASCII.
+- Redistributed Ichnos velocity files can be ASCII or binary. Graph output uses
+  the same encoding as the velocity output.
+- ASCII remains the default output format, so existing configuration files and
+  downstream Ichnos workflows retain their previous behavior.
+- Ichnos must add readers for the `RDIVEL1` and `RDIGRP1` version-1 formats
+  before it can consume binary redist output.
 - All source files must use the configured rank padding and must exist for
   every source rank from `0` through `Nproc - 1`.
 - Graph mode requires matching velocity and graph files from the same NPSAT

@@ -40,6 +40,11 @@ enum class InputFormat {
     ASCII,
     BINARY
 };
+
+enum class OutputFormat {
+    ASCII,
+    BINARY
+};
 /**
  * PntVel is a structure that holds information for a single point.
  */
@@ -247,8 +252,10 @@ struct inputs {
     // Optional input format appended to the legacy first configuration line.
     // AUTO preserves legacy files and selects binary input for *.bin suffixes.
     InputFormat inputFormat = InputFormat::AUTO;
-    // Redistributed output remains ASCII for Ichnos. For binary input this
-    // defaults to the input suffix with the trailing .bin removed.
+    // Redistributed output encoding. ASCII remains the default so that all
+    // legacy input files preserve their behavior.
+    OutputFormat outputFormat = OutputFormat::ASCII;
+    // Output velocity suffix. Its default depends on outputFormat.
     std::string outputSuffix;
     /**
      * The file name that containts the new expanded domain boundaries.
@@ -363,7 +370,10 @@ bool readInputFile(std::string filename, inputs& input) {
                 inp.clear(); // Legacy four-field line: graph input is disabled.
 
             // Backward compatible optional fields:
-            //   ... useGraph [overlapIter] [ascii|binary|auto] [outputSuffix]
+            //   ... useGraph [overlapIter]
+            //       [inputFormat [outputSuffix] [outputFormat]]
+            // If the token following inputFormat is ascii or binary, it is
+            // treated as outputFormat and the output suffix is derived.
             std::string format;
             if (inp >> format) {
                 format = lowerString(format);
@@ -378,14 +388,43 @@ bool readInputFile(std::string filename, inputs& input) {
                               << "'. Expected ascii, binary, or auto." << std::endl;
                     return false;
                 }
-                inp >> input.outputSuffix;
+
+                std::string outputToken;
+                if (inp >> outputToken) {
+                    const std::string lowerOutputToken = lowerString(outputToken);
+                    if (lowerOutputToken == "ascii")
+                        input.outputFormat = OutputFormat::ASCII;
+                    else if (lowerOutputToken == "binary")
+                        input.outputFormat = OutputFormat::BINARY;
+                    else {
+                        input.outputSuffix = outputToken;
+                        std::string outputFormat;
+                        if (inp >> outputFormat) {
+                            outputFormat = lowerString(outputFormat);
+                            if (outputFormat == "ascii")
+                                input.outputFormat = OutputFormat::ASCII;
+                            else if (outputFormat == "binary")
+                                input.outputFormat = OutputFormat::BINARY;
+                            else {
+                                std::cout << "Invalid output format '" << outputFormat
+                                          << "'. Expected ascii or binary." << std::endl;
+                                return false;
+                            }
+                        }
+                    }
+                }
             }
 
             if (input.outputSuffix.empty()) {
                 input.outputSuffix = input.suffix;
-                if (resolvedInputFormat(input) == InputFormat::BINARY &&
-                    endsWith(lowerString(input.outputSuffix), ".bin"))
+                if (input.outputFormat == OutputFormat::BINARY) {
+                    if (!endsWith(lowerString(input.outputSuffix), ".bin"))
+                        input.outputSuffix += ".bin";
+                }
+                else if (resolvedInputFormat(input) == InputFormat::BINARY &&
+                         endsWith(lowerString(input.outputSuffix), ".bin")) {
                     input.outputSuffix.erase(input.outputSuffix.size() - 4);
+                }
             }
 
         }
@@ -433,6 +472,17 @@ template <typename T>
 bool readPod(std::istream& input, T& value) {
     input.read(reinterpret_cast<char*>(&value), sizeof(T));
     return input.good();
+}
+
+template <typename T>
+bool writePod(std::ostream& output, const T& value) {
+    output.write(reinterpret_cast<const char*>(&value), sizeof(T));
+    return output.good();
+}
+
+bool writeMagic(std::ostream& output, const char magic[8]) {
+    output.write(magic, 8);
+    return output.good();
 }
 
 bool readBinaryString(std::istream& input, std::string& value) {
@@ -795,6 +845,253 @@ bool readVelocityWithGraph(std::string filename, int myRank, inputs& input, cell
         outcome = true;
     }
     return outcome;
+}
+
+bool writeRedistributedVelocityHeader(std::ofstream& output,
+                                      const inputs& input,
+                                      int rank,
+                                      int nproc,
+                                      std::uint64_t nPoints) {
+    const char magic[8] = {'R','D','I','V','E','L','1','\0'};
+    const std::uint32_t version = 1;
+    const std::uint32_t dimension = 3;
+    const std::uint32_t outputRank = static_cast<std::uint32_t>(rank);
+    const std::uint32_t outputNproc = static_cast<std::uint32_t>(nproc);
+    const std::uint32_t nData = static_cast<std::uint32_t>(input.Nprint);
+
+    if (!writeMagic(output, magic) ||
+        !writePod(output, version) ||
+        !writePod(output, dimension) ||
+        !writePod(output, outputRank) ||
+        !writePod(output, outputNproc) ||
+        !writePod(output, nData) ||
+        !writePod(output, nPoints))
+        return false;
+
+    // Preserve the one-based source-column identifiers from line 2 of the
+    // configuration file so that a binary reader can identify the payload.
+    for (int i = 0; i < input.Nprint; ++i) {
+        const std::uint32_t sourceColumn =
+            static_cast<std::uint32_t>(input.printOrder[i]);
+        if (!writePod(output, sourceColumn))
+            return false;
+    }
+    return true;
+}
+
+bool writeRedistributedVelocityRecord(std::ofstream& output,
+                                      const PntVel& point,
+                                      int owner,
+                                      const inputs& input) {
+    const std::int32_t outputOwner = static_cast<std::int32_t>(owner);
+    if (!writePod(output, point.x) ||
+        !writePod(output, point.y) ||
+        !writePod(output, point.z) ||
+        !writePod(output, outputOwner))
+        return false;
+
+    for (int i = 0; i < input.Nprint; ++i) {
+        const int sourceIndex = input.printOrder[i] - 1;
+        if (sourceIndex < 0 ||
+            sourceIndex >= static_cast<int>(point.data.size())) {
+            std::cout << "Output column " << input.printOrder[i]
+                      << " is outside the available velocity data." << std::endl;
+            return false;
+        }
+        if (!writePod(output, point.data[sourceIndex]))
+            return false;
+    }
+    return true;
+}
+
+bool writeRedistributedVelocityBinary(const std::string& filename,
+                                      const std::vector<PntVel>& points,
+                                      const inputs& input,
+                                      int rank,
+                                      int nproc) {
+    std::ofstream output(filename.c_str(),
+                         std::ios::out | std::ios::binary | std::ios::trunc);
+    if (!output.good()) {
+        std::cout << "Can't open the binary output file " << filename << std::endl;
+        return false;
+    }
+
+    if (!writeRedistributedVelocityHeader(
+            output, input, rank, nproc,
+            static_cast<std::uint64_t>(points.size())))
+        return false;
+
+    for (std::vector<PntVel>::const_iterator it = points.begin();
+         it != points.end(); ++it) {
+        if (!writeRedistributedVelocityRecord(output, *it, it->proc, input))
+            return false;
+    }
+
+    output.close();
+    if (!output.good()) {
+        std::cout << "Failed while writing binary velocity file "
+                  << filename << std::endl;
+        return false;
+    }
+    return true;
+}
+
+struct BinaryGraphVelocity {
+    const PntVel* point;
+    int owner;
+};
+
+bool printFilesGraphBinary(cellIdList& CLact,
+                           inputs& input,
+                           int rank,
+                           int nproc,
+                           DomainListPoly& dpoly) {
+    boost::timer::cpu_timer timer;
+    std::vector<BinaryGraphVelocity> velocityRecords;
+    std::uint64_t nCells = 0;
+
+    // Assign compact local cell and velocity IDs. Points outside all actual
+    // polygons are omitted from both binary files so graph references remain
+    // consistent with the velocity record count.
+    for (L1map::iterator itLev1 = CLact.CellIds.begin();
+         itLev1 != CLact.CellIds.end(); ++itLev1) {
+        for (L2map::iterator itLev2 = itLev1->second.begin();
+             itLev2 != itLev1->second.end(); ++itLev2) {
+            for (L3map::iterator itLev3 = itLev2->second.begin();
+                 itLev3 != itLev2->second.end(); ++itLev3) {
+                itLev3->second.id = static_cast<int>(nCells++);
+                itLev3->second.VelIds.clear();
+                for (std::size_t i = 0;
+                     i < itLev3->second.CellVelocities.size(); ++i) {
+                    PntVel& point = itLev3->second.CellVelocities[i];
+                    const int owner =
+                        findProcessorOwner(point.x, point.y, dpoly, rank);
+                    if (owner < 0) {
+                        std::cout << "Point " << point.x << " " << point.y
+                                  << " is not in any processor polygons"
+                                  << std::endl;
+                        continue;
+                    }
+                    itLev3->second.VelIds.push_back(
+                        static_cast<int>(velocityRecords.size()));
+                    BinaryGraphVelocity record;
+                    record.point = &point;
+                    record.owner = owner;
+                    velocityRecords.push_back(record);
+                }
+            }
+        }
+    }
+
+    const std::string velocityFilename =
+        input.NewPrefix + num2Padstr(rank, input.Nzeros) + input.outputSuffix;
+    const std::string graphFilename =
+        input.NewPrefix + num2Padstr(rank, input.Nzeros) + ".grph.bin";
+
+    std::ofstream velocityStream(
+        velocityFilename.c_str(),
+        std::ios::out | std::ios::binary | std::ios::trunc);
+    if (!velocityStream.good()) {
+        std::cout << "Can't open the binary output file "
+                  << velocityFilename << std::endl;
+        return false;
+    }
+    if (!writeRedistributedVelocityHeader(
+            velocityStream, input, rank, nproc,
+            static_cast<std::uint64_t>(velocityRecords.size())))
+        return false;
+    for (std::size_t i = 0; i < velocityRecords.size(); ++i) {
+        if (!writeRedistributedVelocityRecord(
+                velocityStream, *velocityRecords[i].point,
+                velocityRecords[i].owner, input))
+            return false;
+    }
+    velocityStream.close();
+    if (!velocityStream.good()) {
+        std::cout << "Failed while writing binary velocity file "
+                  << velocityFilename << std::endl;
+        return false;
+    }
+
+    std::ofstream graphStream(
+        graphFilename.c_str(),
+        std::ios::out | std::ios::binary | std::ios::trunc);
+    if (!graphStream.good()) {
+        std::cout << "Can't open the binary output file "
+                  << graphFilename << std::endl;
+        return false;
+    }
+
+    const char graphMagic[8] = {'R','D','I','G','R','P','1','\0'};
+    const std::uint32_t version = 1;
+    const std::uint32_t dimension = 3;
+    const std::uint32_t outputRank = static_cast<std::uint32_t>(rank);
+    const std::uint32_t outputNproc = static_cast<std::uint32_t>(nproc);
+    const std::uint64_t nVelocityPoints =
+        static_cast<std::uint64_t>(velocityRecords.size());
+    if (!writeMagic(graphStream, graphMagic) ||
+        !writePod(graphStream, version) ||
+        !writePod(graphStream, dimension) ||
+        !writePod(graphStream, outputRank) ||
+        !writePod(graphStream, outputNproc) ||
+        !writePod(graphStream, nCells) ||
+        !writePod(graphStream, nVelocityPoints))
+        return false;
+
+    for (L1map::iterator itLev1 = CLact.CellIds.begin();
+         itLev1 != CLact.CellIds.end(); ++itLev1) {
+        for (L2map::iterator itLev2 = itLev1->second.begin();
+             itLev2 != itLev1->second.end(); ++itLev2) {
+            for (L3map::iterator itLev3 = itLev2->second.begin();
+                 itLev3 != itLev2->second.end(); ++itLev3) {
+                std::vector<std::uint64_t> neighborIds;
+                for (std::size_t i = 0;
+                     i < itLev3->second.neighborCells.size(); ++i) {
+                    if (CLact.find(itLev3->second.neighborCells[i]))
+                        neighborIds.push_back(
+                            static_cast<std::uint64_t>(CLact.itLev3->second.id));
+                }
+
+                const std::uint32_t nNeighbors =
+                    static_cast<std::uint32_t>(neighborIds.size());
+                const std::uint32_t nCellVelocities =
+                    static_cast<std::uint32_t>(itLev3->second.VelIds.size());
+                if (!writePod(graphStream, itLev3->second.x) ||
+                    !writePod(graphStream, itLev3->second.y) ||
+                    !writePod(graphStream, itLev3->second.z) ||
+                    !writePod(graphStream, nNeighbors) ||
+                    !writePod(graphStream, nCellVelocities))
+                    return false;
+
+                for (std::size_t i = 0; i < neighborIds.size(); ++i) {
+                    if (!writePod(graphStream, neighborIds[i]))
+                        return false;
+                }
+                for (std::size_t i = 0;
+                     i < itLev3->second.VelIds.size(); ++i) {
+                    const std::uint64_t velocityId =
+                        static_cast<std::uint64_t>(itLev3->second.VelIds[i]);
+                    if (!writePod(graphStream, velocityId))
+                        return false;
+                }
+            }
+        }
+    }
+
+    graphStream.close();
+    if (!graphStream.good()) {
+        std::cout << "Failed while writing binary graph file "
+                  << graphFilename << std::endl;
+        return false;
+    }
+
+    boost::chrono::duration<double> seconds =
+        boost::chrono::nanoseconds(timer.elapsed().user);
+    std::cout << ". . . .Proc " << rank << " spend "
+              << seconds.count() / 60 << " min to print "
+              << nCells << " binary cells and " << velocityRecords.size()
+              << " binary velocity points" << std::endl;
+    return true;
 }
 
 void printFilesGraphV2(cellIdList& CLact, inputs& input, int rank, DomainListPoly& dpoly){
@@ -1257,7 +1554,7 @@ int main(int argc, char* argv[])
     boost::mpi::communicator world;
 
     //if (world.rank() == 0){
-        std::cout << "Redist version 1.3" << std::endl;
+        std::cout << "Redist version 1.4" << std::endl;
     //}
 
     //int DomainId = std::stoi(argv[2]);
@@ -1275,6 +1572,8 @@ int main(int argc, char* argv[])
     const InputFormat inputFormat = resolvedInputFormat(inp);
     std::cout << "Input format: "
               << (inputFormat == InputFormat::BINARY ? "binary" : "ascii")
+              << "; output format: "
+              << (inp.outputFormat == OutputFormat::BINARY ? "binary" : "ascii")
               << "; redistributed Ichnos suffix: " << inp.outputSuffix
               << std::endl;
 
@@ -1319,7 +1618,15 @@ int main(int argc, char* argv[])
                 return 0;
         }
         world.barrier();
-        printFilesGraphV2(CLactual, inp, DomainId, actualDom);
+        if (inp.outputFormat == OutputFormat::BINARY)
+            tf = printFilesGraphBinary(CLactual, inp, DomainId,
+                                       world.size(), actualDom);
+        else {
+            printFilesGraphV2(CLactual, inp, DomainId, actualDom);
+            tf = true;
+        }
+        if (!tf)
+            return 0;
     }
     else{
         std::vector< PntVel> my_data;
@@ -1337,18 +1644,26 @@ int main(int argc, char* argv[])
 
         std::cout << "____ Processor " << DomainId << " is printing..." << std::endl;
         std::string outfilename = inp.NewPrefix + num2Padstr(DomainId, inp.Nzeros) + inp.outputSuffix;
-        std::ofstream outstream;
-        outstream.open(outfilename.c_str());
-        for (std::vector<PntVel>::iterator it = my_data.begin(); it != my_data.end(); ++it) {
-            outstream << std::setprecision(3) << std::fixed
-                      << it->x << " " << it->y << " " << it->z << " " << it->proc << " ";
-
-            for (int i = 0; i < inp.Nprint; i++){
-                outstream << std::setprecision(inp.prec[i]) << std::fixed << it->data[ inp.printOrder[i] - 1 ] << " ";
-            }
-            outstream << std::endl;
+        if (inp.outputFormat == OutputFormat::BINARY) {
+            tf = writeRedistributedVelocityBinary(
+                outfilename, my_data, inp, DomainId, world.size());
+            if (!tf)
+                return 0;
         }
-        outstream.close();
+        else {
+            std::ofstream outstream;
+            outstream.open(outfilename.c_str());
+            for (std::vector<PntVel>::iterator it = my_data.begin(); it != my_data.end(); ++it) {
+                outstream << std::setprecision(3) << std::fixed
+                          << it->x << " " << it->y << " " << it->z << " " << it->proc << " ";
+
+                for (int i = 0; i < inp.Nprint; i++){
+                    outstream << std::setprecision(inp.prec[i]) << std::fixed << it->data[ inp.printOrder[i] - 1 ] << " ";
+                }
+                outstream << std::endl;
+            }
+            outstream.close();
+        }
     }
 
 
