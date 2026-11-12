@@ -8,12 +8,12 @@
 #include <sstream>
 #include <vector>
 #include <map>
-#include<string>
 #include <iomanip>
 #include <cstdint>
 #include <cstring>
 #include <algorithm>
 #include <cctype>
+#include <stdexcept>
 
 //#include <chrono>
 //#include <ctime>
@@ -30,8 +30,6 @@
 #include <boost/geometry.hpp>
 #include <boost/geometry/geometries/point_xy.hpp>
 #include <boost/geometry/geometries/polygon.hpp>
-
-#include <boost/spirit/include/qi.hpp>
 
 int dgbRank = 0;
 
@@ -87,20 +85,38 @@ std::string cellIDint::to_string(){
     return std::to_string(a) + ":" + std::to_string(b) + "_" + std::to_string(c);
 }
 
-cellIDint cellID2int(std::string str){
-    std::vector<std::string> vec;
-    bool res = boost::spirit::qi::parse(str.begin(), str.end(),
-                                        boost::spirit::qi::as_string[*(boost::spirit::qi::char_ - ':' - "_")] %
-                                        (boost::spirit::qi::lit(':') | boost::spirit::qi::lit('_')), vec);
-    int a, b, c;
-    a = stoi(vec[0]);
-    b = stoi(vec[1]);
-    if (b == 0){
-        c = -9;
+bool parseCellIdInteger(const std::string& text, int& value) {
+    std::istringstream input(text.c_str());
+    char extra = 0;
+    if (!(input >> value))
+        return false;
+    return !(input >> extra);
+}
+
+cellIDint cellID2int(const std::string& str){
+    std::vector<std::string> parts;
+    std::string::size_type begin = 0;
+    for (std::string::size_type i = 0; i <= str.size(); ++i) {
+        if (i == str.size() || str[i] == ':' || str[i] == '_') {
+            parts.push_back(str.substr(begin, i - begin));
+            begin = i + 1;
+        }
     }
-    else{
-        c = stoi(vec[2]);
-    }
+
+    if (parts.size() < 2)
+        throw std::runtime_error("Invalid cell ID: " + str);
+
+    int a = -1;
+    int b = -1;
+    int c = -9;
+    const bool haveA = parseCellIdInteger(parts[0], a);
+    const bool haveB = parseCellIdInteger(parts[1], b);
+    bool haveC = true;
+    if (b != 0)
+        haveC = parts.size() >= 3 && parseCellIdInteger(parts[2], c);
+
+    if (!haveA || !haveB || !haveC)
+        throw std::runtime_error("Invalid cell ID: " + str);
 
     return cellIDint(a, b, c);
 }
@@ -310,16 +326,19 @@ InputFormat resolvedInputFormat(const inputs& input) {
                : InputFormat::ASCII;
 }
 
-int findProcessorOwner(double x, double y, DomainListPoly& actual, int rank){
-    if (boost::geometry::within(bpoint(x, y), actual[rank])){
+int findProcessorOwner(double x, double y, const DomainListPoly& actual, int rank){
+    DomainListPoly::const_iterator rankDomain = actual.find(rank);
+    if (rankDomain != actual.end() &&
+        boost::geometry::within(bpoint(x, y), rankDomain->second)){
         return rank;
     }
     else{
-        for(unsigned int i = 0; i < actual.size(); ++i){
-            if ( i == rank)
+        for (DomainListPoly::const_iterator it = actual.begin();
+             it != actual.end(); ++it){
+            if (it->first == rank)
                 continue;
-            if (boost::geometry::within(bpoint(x, y), actual[i])){
-                return i;
+            if (boost::geometry::within(bpoint(x, y), it->second)){
+                return it->first;
             }
         }
     }
@@ -731,7 +750,6 @@ bool readCellGraphFiles(std::string filename, cellIdList& CLact, cellIdList& CLe
         int n;
         int nAct = 0;
         int nExp = 0;
-        int count_lines = 0;
         std::string celidstr;
         while (getline(datafile, line)){
             if (line.size() > 1){
@@ -749,7 +767,6 @@ bool readCellGraphFiles(std::string filename, cellIdList& CLact, cellIdList& CLe
                 }
                 if (inExp || inAct){
                     inp >> n;
-                    std::vector<cellIDint> neighcells;
                     inp >> celidstr;
                     cellData cdata;
                     cdata.x = x;
@@ -799,14 +816,11 @@ bool readVelocityWithGraph(std::string filename, int myRank, inputs& input, cell
         std::cout << "Processor " << myRank << " reads velocity file " << filename << std::endl;
         boost::timer::cpu_timer timer;
         std::string line;
-        double x, y, z;
         int cnt_data = 0;
         std::string celidstr;
-        int cnt_lines = 0;
         while (getline(datafile, line)){
             if (line.size() > 1){
                 //if (myRank == dgbRank){
-                //std::cout << cnt_lines++ << std::endl;
                 //std:: cout << line << std::endl;
                 //}
 
@@ -1108,7 +1122,8 @@ void printFilesGraphV2(cellIdList& CLact, inputs& input, int rank, DomainListPol
             for (itLev3 = itLev2->second.begin(); itLev3 != itLev2->second.end(); ++ itLev3){
                 itLev3->second.id = cellIdx;
                 cellIdx++;
-                for (int i = 0; i < itLev3->second.CellVelocities.size(); ++i){
+                for (std::size_t i = 0;
+                     i < itLev3->second.CellVelocities.size(); ++i){
                     itLev3->second.VelIds.push_back(velIdx);
                     velIdx++;
                 }
@@ -1130,7 +1145,7 @@ void printFilesGraphV2(cellIdList& CLact, inputs& input, int rank, DomainListPol
         for (itLev2 = itLev1->second.begin(); itLev2 != itLev1->second.end(); ++itLev2){
             for (itLev3 = itLev2->second.begin(); itLev3 != itLev2->second.end(); ++ itLev3){
                 // Print the velocities
-                for (unsigned int i = 0; i < itLev3->second.VelIds.size(); ++i){
+                for (std::size_t i = 0; i < itLev3->second.VelIds.size(); ++i){
                     int proc = findProcessorOwner(itLev3->second.CellVelocities[i].x,
                                                   itLev3->second.CellVelocities[i].y,
                                                   dpoly, rank);
@@ -1146,7 +1161,7 @@ void printFilesGraphV2(cellIdList& CLact, inputs& input, int rank, DomainListPol
                                   << itLev3->second.CellVelocities[i].y << " "
                                   << itLev3->second.CellVelocities[i].z << " "
                                   << proc << " ";
-                        for (unsigned int j = 0; j < input.Nprint; ++j){
+                        for (int j = 0; j < input.Nprint; ++j){
                             velstream << std::setprecision(input.prec[j]) << std::fixed
                                       << itLev3->second.CellVelocities[i].data[input.printOrder[j] - 1] << " ";
                         }
@@ -1155,7 +1170,7 @@ void printFilesGraphV2(cellIdList& CLact, inputs& input, int rank, DomainListPol
                 }
 
                 std::vector<int> tmp;
-                for(unsigned int i = 0; i < itLev3->second.neighborCells.size(); ++i){
+                for(std::size_t i = 0; i < itLev3->second.neighborCells.size(); ++i){
                     bool tf = CLact.find(itLev3->second.neighborCells[i]);
                     if (tf){
                         tmp.push_back(CLact.itLev3->second.id);
@@ -1168,10 +1183,10 @@ void printFilesGraphV2(cellIdList& CLact, inputs& input, int rank, DomainListPol
                             << itLev3->second.z << " "
                             << tmp.size() << " "
                             << itLev3->second.CellVelocities.size() << " ";
-                for(unsigned int i = 0; i < tmp.size(); ++i){
+                for(std::size_t i = 0; i < tmp.size(); ++i){
                     graphstream << tmp[i] << " ";
                 }
-                for (unsigned int i = 0; i < itLev3->second.VelIds.size(); ++i){
+                for (std::size_t i = 0; i < itLev3->second.VelIds.size(); ++i){
                     graphstream << itLev3->second.VelIds[i] << " ";
                 }
                 graphstream << std::endl;
@@ -1196,7 +1211,8 @@ void printFilesGraph(cellIdList& CLact, inputs& input, int rank, DomainListPoly&
     for (itLev1 = CLact.CellIds.begin(); itLev1 != CLact.CellIds.end(); ++itLev1){
         for (itLev2 = itLev1->second.begin(); itLev2 != itLev1->second.end(); ++itLev2){
             for (itLev3 = itLev2->second.begin(); itLev3 != itLev2->second.end(); ++ itLev3){
-                for (int i = 0; i < itLev3->second.CellVelocities.size(); ++i){
+                for (std::size_t i = 0;
+                     i < itLev3->second.CellVelocities.size(); ++i){
                     itLev3->second.VelIds.push_back(idx);
                     idx++;
                 }
@@ -1216,7 +1232,7 @@ void printFilesGraph(cellIdList& CLact, inputs& input, int rank, DomainListPoly&
     for (itLev1 = CLact.CellIds.begin(); itLev1 != CLact.CellIds.end(); ++itLev1){
         for (itLev2 = itLev1->second.begin(); itLev2 != itLev1->second.end(); ++itLev2){
             for (itLev3 = itLev2->second.begin(); itLev3 != itLev2->second.end(); ++ itLev3){
-                for (unsigned int i = 0; i < itLev3->second.VelIds.size(); ++i){
+                for (std::size_t i = 0; i < itLev3->second.VelIds.size(); ++i){
                     int proc = findProcessorOwner(itLev3->second.CellVelocities[i].x,
                                        itLev3->second.CellVelocities[i].y,
                                        dpoly, rank);
@@ -1232,7 +1248,7 @@ void printFilesGraph(cellIdList& CLact, inputs& input, int rank, DomainListPoly&
                                   << itLev3->second.CellVelocities[i].y << " "
                                   << itLev3->second.CellVelocities[i].z << " "
                                   << proc << " ";
-                        for (unsigned int j = 0; j < input.Nprint; ++j){
+                        for (int j = 0; j < input.Nprint; ++j){
                             velstream << std::setprecision(input.prec[j]) << std::fixed
                             << itLev3->second.CellVelocities[i].data[input.printOrder[j] - 1] << " ";
                         }
@@ -1242,23 +1258,24 @@ void printFilesGraph(cellIdList& CLact, inputs& input, int rank, DomainListPoly&
                     // Make a list of the ids that this velocity node depends on
                     // Add first all the velocity nodes of the
                     std::vector<int> tmp;
-                    for (unsigned int j = 0; j < itLev3->second.VelIds.size(); ++j){
+                    for (std::size_t j = 0; j < itLev3->second.VelIds.size(); ++j){
                         if (itLev3->second.VelIds[j] == idx)
                             continue;
                         tmp.push_back(itLev3->second.VelIds[j]);
                     }
 
                     // Add the node ids of the neighboring cells
-                    for (unsigned int j = 0; j < itLev3->second.neighborCells.size(); ++j){
+                    for (std::size_t j = 0; j < itLev3->second.neighborCells.size(); ++j){
                         bool tf = CLact.find(itLev3->second.neighborCells[j]);
                         if (tf){
-                            for (int k = 0; k < CLact.itLev3->second.VelIds.size(); ++k){
+                            for (std::size_t k = 0;
+                                 k < CLact.itLev3->second.VelIds.size(); ++k){
                                 tmp.push_back(CLact.itLev3->second.VelIds[k]);
                             }
                         }
                     }
                     graphstream << tmp.size() << " ";
-                    for (unsigned int j = 0; j < tmp.size(); ++j){
+                    for (std::size_t j = 0; j < tmp.size(); ++j){
                         graphstream << tmp[j] << " ";
                     }
                     graphstream << std::endl;
@@ -1285,7 +1302,8 @@ void appendNeighborCells(cellIdList& CLact, cellIdList& CLexp, inputs& input){
         for (itLev1 = CLact.CellIds.begin(); itLev1 != CLact.CellIds.end(); ++itLev1){
             for (itLev2 = itLev1->second.begin(); itLev2 != itLev1->second.end(); ++itLev2){
                 for (itLev3 = itLev2->second.begin(); itLev3 != itLev2->second.end(); ++ itLev3){
-                    for (int j = 0; j < itLev3->second.neighborCells.size(); ++j){
+                    for (std::size_t j = 0;
+                         j < itLev3->second.neighborCells.size(); ++j){
                         foundCell = CLact.find(itLev3->second.neighborCells[j]);
                         if (!foundCell){
                             foundCell = CLextra.find(itLev3->second.neighborCells[j]);
@@ -1390,7 +1408,6 @@ bool readVelocityFiles(std::string filename, std::vector< PntVel>& points, int m
                     inp >> pv.z;
                     pv.proc = proc;
                     double dd;
-                    int ii;
                     for (int i = 0; i < input.Ninfo; i++)
                     {
                         inp >> dd;

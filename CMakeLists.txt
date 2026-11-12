@@ -9,13 +9,21 @@ endif(UNIX)
 
 project(redist)
 
+# Boost.MPI already disables the deprecated OpenMPI C++ bindings in its own
+# config header.  Keep the equivalent MPICH definition for older installations.
+# The Boost.Geometry definition suppresses its informational C++03 notice;
+# redist is compiled as C++11 on UNIX.  SYSTEM include directories keep
+# third-party header warnings separate from warnings in redist itself.
+add_definitions(-DMPICH_SKIP_MPICXX)
+add_definitions(-DBOOST_GEOMETRY_DISABLE_DEPRECATED_03_WARNING)
+
 find_package(MPI REQUIRED)
 
 #find_package( CGAL QUIET COMPONENTS  )
 #include( ${CGAL_USE_FILE} )
 
 find_package(Boost 1.4 REQUIRED COMPONENTS mpi serialization system timer chrono filesystem)
-INCLUDE_DIRECTORIES(${MPI_INCLUDE_PATH} ${Boost_INCLUDE_DIRS})
+include_directories(SYSTEM ${MPI_INCLUDE_PATH} ${Boost_INCLUDE_DIRS})
 
 add_executable(${PROJECT_NAME} "redist.cpp")
 
