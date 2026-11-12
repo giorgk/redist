@@ -9,6 +9,11 @@
 #include <vector>
 #include <map>
 #include<string>
+#include <iomanip>
+#include <cstdint>
+#include <cstring>
+#include <algorithm>
+#include <cctype>
 
 //#include <chrono>
 //#include <ctime>
@@ -29,6 +34,12 @@
 #include <boost/spirit/include/qi.hpp>
 
 int dgbRank = 0;
+
+enum class InputFormat {
+    AUTO,
+    ASCII,
+    BINARY
+};
 /**
  * PntVel is a structure that holds information for a single point.
  */
@@ -233,6 +244,12 @@ struct inputs {
      * If the file is example1__0000_test01.ich then the suffix is _test01.ich
      */
     std::string suffix;
+    // Optional input format appended to the legacy first configuration line.
+    // AUTO preserves legacy files and selects binary input for *.bin suffixes.
+    InputFormat inputFormat = InputFormat::AUTO;
+    // Redistributed output remains ASCII for Ichnos. For binary input this
+    // defaults to the input suffix with the trailing .bin removed.
+    std::string outputSuffix;
     /**
      * The file name that containts the new expanded domain boundaries.
      */
@@ -249,7 +266,7 @@ struct inputs {
     int Nprint;
     std::vector<int> printOrder;
 
-    bool UseGraph;
+    bool UseGraph = false;
     int overlapIter = 0;
 
 };
@@ -265,6 +282,25 @@ std::string num2Padstr(int i, int n) {
     std::stringstream ss;
     ss << std::setw(n) << std::setfill('0') << i;
     return ss.str();
+}
+
+std::string lowerString(std::string value) {
+    std::transform(value.begin(), value.end(), value.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return value;
+}
+
+bool endsWith(const std::string& value, const std::string& ending) {
+    return value.size() >= ending.size() &&
+           value.compare(value.size() - ending.size(), ending.size(), ending) == 0;
+}
+
+InputFormat resolvedInputFormat(const inputs& input) {
+    if (input.inputFormat != InputFormat::AUTO)
+        return input.inputFormat;
+    return endsWith(lowerString(input.suffix), ".bin")
+               ? InputFormat::BINARY
+               : InputFormat::ASCII;
 }
 
 int findProcessorOwner(double x, double y, DomainListPoly& actual, int rank){
@@ -311,12 +347,45 @@ bool readInputFile(std::string filename, inputs& input) {
             // Ending of file name
             inp >> input.suffix;
             // Is NPSAT graph available
-            int tmp;
-            inp >> tmp;
-            if (tmp != 0 ){
-                input.UseGraph = true;
-                inp >> tmp;
-                input.overlapIter = tmp;
+            int tmp = 0;
+            if (inp >> tmp) {
+                if (tmp != 0 ){
+                    input.UseGraph = true;
+                    if (!(inp >> tmp)) {
+                        std::cout << "The graph overlap iteration count is missing."
+                                  << std::endl;
+                        return false;
+                    }
+                    input.overlapIter = tmp;
+                }
+            }
+            else
+                inp.clear(); // Legacy four-field line: graph input is disabled.
+
+            // Backward compatible optional fields:
+            //   ... useGraph [overlapIter] [ascii|binary|auto] [outputSuffix]
+            std::string format;
+            if (inp >> format) {
+                format = lowerString(format);
+                if (format == "ascii")
+                    input.inputFormat = InputFormat::ASCII;
+                else if (format == "binary")
+                    input.inputFormat = InputFormat::BINARY;
+                else if (format == "auto")
+                    input.inputFormat = InputFormat::AUTO;
+                else {
+                    std::cout << "Invalid input format '" << format
+                              << "'. Expected ascii, binary, or auto." << std::endl;
+                    return false;
+                }
+                inp >> input.outputSuffix;
+            }
+
+            if (input.outputSuffix.empty()) {
+                input.outputSuffix = input.suffix;
+                if (resolvedInputFormat(input) == InputFormat::BINARY &&
+                    endsWith(lowerString(input.outputSuffix), ".bin"))
+                    input.outputSuffix.erase(input.outputSuffix.size() - 4);
             }
 
         }
@@ -358,6 +427,240 @@ bool readInputFile(std::string filename, inputs& input) {
         datafile.close();
     }
     return outcome;
+}
+
+template <typename T>
+bool readPod(std::istream& input, T& value) {
+    input.read(reinterpret_cast<char*>(&value), sizeof(T));
+    return input.good();
+}
+
+bool readBinaryString(std::istream& input, std::string& value) {
+    std::uint32_t length = 0;
+    if (!readPod(input, length))
+        return false;
+    value.resize(length);
+    if (length > 0)
+        input.read(&value[0], static_cast<std::streamsize>(length));
+    return input.good();
+}
+
+bool readAndCheckMagic(std::istream& input,
+                       const char expected[8],
+                       const std::string& filename) {
+    char actual[8] = {0,0,0,0,0,0,0,0};
+    input.read(actual, 8);
+    if (!input.good() || std::memcmp(actual, expected, 8) != 0) {
+        std::cout << "Invalid binary file magic in " << filename << std::endl;
+        return false;
+    }
+    return true;
+}
+
+struct BinaryVelocityHeader {
+    std::uint32_t dimension = 0;
+    std::uint32_t sourceRank = 0;
+    std::uint32_t sourceNproc = 0;
+    std::uint32_t pointsPerCell = 0;
+    std::uint32_t faceMode = 0;
+    std::uint64_t nCells = 0;
+    std::uint64_t nPoints = 0;
+};
+
+bool readBinaryVelocityHeader(std::ifstream& input,
+                              const std::string& filename,
+                              const int expectedRank,
+                              const int expectedNproc,
+                              BinaryVelocityHeader& header) {
+    const char expectedMagic[8] = {'N','P','S','I','V','L','1','\0'};
+    if (!readAndCheckMagic(input, expectedMagic, filename))
+        return false;
+
+    std::uint32_t version = 0;
+    if (!readPod(input, version) ||
+        !readPod(input, header.dimension) ||
+        !readPod(input, header.sourceRank) ||
+        !readPod(input, header.sourceNproc) ||
+        !readPod(input, header.pointsPerCell) ||
+        !readPod(input, header.faceMode) ||
+        !readPod(input, header.nCells) ||
+        !readPod(input, header.nPoints)) {
+        std::cout << "Incomplete binary velocity header in " << filename << std::endl;
+        return false;
+    }
+
+    if (version != 1 || header.dimension != 3 ||
+        header.sourceRank != static_cast<std::uint32_t>(expectedRank) ||
+        header.sourceNproc != static_cast<std::uint32_t>(expectedNproc) ||
+        (header.pointsPerCell != 1 && header.pointsPerCell != 8) ||
+        header.faceMode > 1) {
+        std::cout << "Unsupported or inconsistent binary velocity header in "
+                  << filename << std::endl;
+        return false;
+    }
+    return true;
+}
+
+bool readBinaryVelocityRecord(std::ifstream& input,
+                              PntVel& point,
+                              std::string& cellId) {
+    double vx = 0.0, vy = 0.0, vz = 0.0;
+    double diameter = 0.0, ratio = 0.0;
+    std::uint32_t sourceRank = 0;
+    if (!readPod(input, point.x) ||
+        !readPod(input, point.y) ||
+        !readPod(input, point.z) ||
+        !readPod(input, vx) ||
+        !readPod(input, vy) ||
+        !readPod(input, vz) ||
+        !readPod(input, sourceRank) ||
+        !readPod(input, diameter) ||
+        !readPod(input, ratio) ||
+        !readBinaryString(input, cellId))
+        return false;
+
+    point.proc = static_cast<int>(sourceRank);
+    point.data.clear();
+    // Preserve the legacy NPSAT ASCII logical column order:
+    // vx vy vz source_rank diameter ratio.
+    point.data.push_back(vx);
+    point.data.push_back(vy);
+    point.data.push_back(vz);
+    point.data.push_back(static_cast<double>(sourceRank));
+    point.data.push_back(diameter);
+    point.data.push_back(ratio);
+    return true;
+}
+
+bool readCellGraphFilesBinary(std::string filename,
+                              cellIdList& CLact,
+                              cellIdList& CLexp,
+                              int myrank,
+                              DomainListPoly& expanded,
+                              DomainListPoly& actual,
+                              int expectedSourceRank,
+                              int expectedNproc) {
+    std::ifstream datafile(filename.c_str(), std::ios::binary);
+    if (!datafile.good()) {
+        std::cout << "Can't open the file " << filename << std::endl;
+        return false;
+    }
+
+    const char expectedMagic[8] = {'N','P','S','I','G','R','1','\0'};
+    if (!readAndCheckMagic(datafile, expectedMagic, filename))
+        return false;
+
+    std::uint32_t version = 0, dimension = 0, sourceRank = 0, sourceNproc = 0;
+    std::uint64_t nCells = 0;
+    if (!readPod(datafile, version) ||
+        !readPod(datafile, dimension) ||
+        !readPod(datafile, sourceRank) ||
+        !readPod(datafile, sourceNproc) ||
+        !readPod(datafile, nCells)) {
+        std::cout << "Incomplete binary graph header in " << filename << std::endl;
+        return false;
+    }
+    if (version != 1 || dimension != 3 ||
+        sourceRank != static_cast<std::uint32_t>(expectedSourceRank) ||
+        sourceNproc != static_cast<std::uint32_t>(expectedNproc)) {
+        std::cout << "Unsupported or inconsistent binary graph header in "
+                  << filename << std::endl;
+        return false;
+    }
+
+    std::cout << "Processor " << myrank << " reads binary graph file "
+              << filename << std::endl;
+    boost::timer::cpu_timer timer;
+    int nAct = 0;
+    int nExp = 0;
+
+    for (std::uint64_t record = 0; record < nCells; ++record) {
+        double x = 0.0, y = 0.0, z = 0.0;
+        std::uint32_t nNeighbors = 0;
+        std::string cellId;
+        if (!readPod(datafile, x) || !readPod(datafile, y) ||
+            !readPod(datafile, z) || !readPod(datafile, nNeighbors) ||
+            !readBinaryString(datafile, cellId)) {
+            std::cout << "Incomplete binary graph record in " << filename << std::endl;
+            return false;
+        }
+
+        cellData cdata;
+        cdata.x = x;
+        cdata.y = y;
+        cdata.z = z;
+        for (std::uint32_t i = 0; i < nNeighbors; ++i) {
+            std::string neighborId;
+            if (!readBinaryString(datafile, neighborId)) {
+                std::cout << "Incomplete binary graph neighbor list in "
+                          << filename << std::endl;
+                return false;
+            }
+            cdata.neighborCells.push_back(cellID2int(neighborId));
+        }
+
+        if (boost::geometry::within(bpoint(x, y), actual[myrank])) {
+            CLact.insert(cellID2int(cellId), cdata);
+            ++nAct;
+        }
+        else if (boost::geometry::within(bpoint(x, y), expanded[myrank])) {
+            CLexp.insert(cellID2int(cellId), cdata);
+            ++nExp;
+        }
+    }
+
+    boost::chrono::duration<double> seconds =
+        boost::chrono::nanoseconds(timer.elapsed().user);
+    std::cout << ". . . .Proc " << myrank << " spend "
+              << seconds.count() / 60 << " min to read "
+              << nAct << " " << nExp << std::endl;
+    return true;
+}
+
+bool readVelocityWithGraphBinary(std::string filename,
+                                 int myRank,
+                                 inputs& input,
+                                 cellIdList& CLact,
+                                 int expectedSourceRank) {
+    if (input.Ninfo != 6) {
+        std::cout << "Binary NPSAT velocity files provide exactly 6 logical data columns "
+                     "(vx vy vz source_rank diameter ratio); Ndata must be 6."
+                  << std::endl;
+        return false;
+    }
+
+    std::ifstream datafile(filename.c_str(), std::ios::binary);
+    if (!datafile.good()) {
+        std::cout << "Can't open the file " << filename << std::endl;
+        return false;
+    }
+
+    BinaryVelocityHeader header;
+    if (!readBinaryVelocityHeader(datafile, filename, expectedSourceRank,
+                                  input.NinitDom, header))
+        return false;
+
+    std::cout << "Processor " << myRank << " reads binary velocity file "
+              << filename << std::endl;
+    boost::timer::cpu_timer timer;
+    int inserted = 0;
+    for (std::uint64_t record = 0; record < header.nPoints; ++record) {
+        PntVel point;
+        std::string cellId;
+        if (!readBinaryVelocityRecord(datafile, point, cellId)) {
+            std::cout << "Incomplete binary velocity record in " << filename << std::endl;
+            return false;
+        }
+        if (CLact.addVelocityPoint(cellID2int(cellId), point))
+            ++inserted;
+    }
+
+    boost::chrono::duration<double> seconds =
+        boost::chrono::nanoseconds(timer.elapsed().user);
+    std::cout << ". . . .Proc " << myRank << " spend "
+              << seconds.count() / 60 << " min to insert "
+              << inserted << " data" << std::endl;
+    return true;
 }
 
 bool readCellGraphFiles(std::string filename, cellIdList& CLact, cellIdList& CLexp,
@@ -522,7 +825,7 @@ void printFilesGraphV2(cellIdList& CLact, inputs& input, int rank, DomainListPol
     std::ofstream graphstream;
     graphstream.open(graphfilename.c_str());
 
-    std::string velfilename = input.NewPrefix + num2Padstr(rank, input.Nzeros) + input.suffix;
+    std::string velfilename = input.NewPrefix + num2Padstr(rank, input.Nzeros) + input.outputSuffix;
     std::ofstream velstream;
     velstream.open(velfilename.c_str());
 
@@ -609,7 +912,7 @@ void printFilesGraph(cellIdList& CLact, inputs& input, int rank, DomainListPoly&
     std::ofstream graphstream;
     graphstream.open(graphfilename.c_str());
 
-    std::string velfilename = input.NewPrefix + num2Padstr(rank, input.Nzeros) + input.suffix;
+    std::string velfilename = input.NewPrefix + num2Padstr(rank, input.Nzeros) + input.outputSuffix;
     std::ofstream velstream;
     velstream.open(velfilename.c_str());
     idx = 0;
@@ -811,6 +1114,80 @@ bool readVelocityFiles(std::string filename, std::vector< PntVel>& points, int m
     return outcome;
 }
 
+bool readVelocityFilesBinary(std::string filename,
+                             std::vector<PntVel>& points,
+                             int myRank,
+                             DomainListPoly& expanded,
+                             DomainListPoly& actual,
+                             inputs& input,
+                             int expectedSourceRank) {
+    if (input.Ninfo != 6) {
+        std::cout << "Binary NPSAT velocity files provide exactly 6 logical data columns "
+                     "(vx vy vz source_rank diameter ratio); Ndata must be 6."
+                  << std::endl;
+        return false;
+    }
+
+    std::ifstream datafile(filename.c_str(), std::ios::binary);
+    if (!datafile.good()) {
+        std::cout << "Can't open the file " << filename << std::endl;
+        return false;
+    }
+
+    BinaryVelocityHeader header;
+    if (!readBinaryVelocityHeader(datafile, filename, expectedSourceRank,
+                                  input.NinitDom, header))
+        return false;
+
+    std::cout << "Processor " << myRank << " reads binary velocity file "
+              << filename << std::endl;
+    boost::timer::cpu_timer timer;
+    std::uint64_t selected = 0;
+
+    for (std::uint64_t record = 0; record < header.nPoints; ++record) {
+        PntVel point;
+        std::string cellId;
+        if (!readBinaryVelocityRecord(datafile, point, cellId)) {
+            std::cout << "Incomplete binary velocity record in " << filename << std::endl;
+            return false;
+        }
+
+        if (!boost::geometry::within(bpoint(point.x, point.y), expanded[myRank]))
+            continue;
+
+        int proc = -9;
+        if (boost::geometry::within(bpoint(point.x, point.y), actual[myRank]))
+            proc = myRank;
+        else {
+            DomainListPoly::iterator it = actual.begin();
+            for (; it != actual.end(); ++it) {
+                if (it->first == myRank)
+                    continue;
+                if (boost::geometry::within(bpoint(point.x, point.y), it->second)) {
+                    proc = it->first;
+                    break;
+                }
+            }
+        }
+
+        if (proc == -9) {
+            std::cout << "Cant find actual domain for point ("
+                      << point.x << "," << point.y
+                      << ") in my expanded domain with id " << myRank << std::endl;
+        }
+        point.proc = proc;
+        points.push_back(point);
+        ++selected;
+    }
+
+    boost::chrono::duration<double> seconds =
+        boost::chrono::nanoseconds(timer.elapsed().user);
+    std::cout << ". . . .Proc " << myRank << " spend "
+              << seconds.count() / 60 << " min to select "
+              << selected << " data" << std::endl;
+    return true;
+}
+
 
 
 /**
@@ -880,7 +1257,7 @@ int main(int argc, char* argv[])
     boost::mpi::communicator world;
 
     //if (world.rank() == 0){
-        std::cout << "Redist version 1.2" << std::endl;
+        std::cout << "Redist version 1.3" << std::endl;
     //}
 
     //int DomainId = std::stoi(argv[2]);
@@ -894,6 +1271,12 @@ int main(int argc, char* argv[])
     bool tf = readInputFile(argv[1], inp);
     if (!tf)
         return 0;
+
+    const InputFormat inputFormat = resolvedInputFormat(inp);
+    std::cout << "Input format: "
+              << (inputFormat == InputFormat::BINARY ? "binary" : "ascii")
+              << "; redistributed Ichnos suffix: " << inp.outputSuffix
+              << std::endl;
 
 
     DomainListPoly actualDom, expandedDom;
@@ -909,16 +1292,31 @@ int main(int argc, char* argv[])
         cellIdList CLactual;
         cellIdList CLbuffer;
         for (int iproc = 0; iproc < inp.NinitDom; ++iproc) {
-            std::string filename = inp.prefix + num2Padstr(iproc, inp.Nzeros) + ".grph";
-            tf = readCellGraphFiles(filename, CLactual, CLbuffer,
-                                    DomainId, expandedDom, actualDom);
+            const std::string graphSuffix =
+                inputFormat == InputFormat::BINARY ? ".grph.bin" : ".grph";
+            std::string filename = inp.prefix + num2Padstr(iproc, inp.Nzeros) + graphSuffix;
+            if (inputFormat == InputFormat::BINARY)
+                tf = readCellGraphFilesBinary(filename, CLactual, CLbuffer,
+                                              DomainId, expandedDom, actualDom,
+                                              iproc, inp.NinitDom);
+            else
+                tf = readCellGraphFiles(filename, CLactual, CLbuffer,
+                                        DomainId, expandedDom, actualDom);
+            if (!tf)
+                return 0;
         }
         world.barrier();
         appendNeighborCells(CLactual, CLbuffer, inp);
         world.barrier();
         for (int iproc = 0; iproc < inp.NinitDom; ++iproc){
             std::string filename1 = inp.prefix + num2Padstr(iproc, inp.Nzeros) + inp.suffix;
-            tf = readVelocityWithGraph(filename1, DomainId, inp, CLactual);
+            if (inputFormat == InputFormat::BINARY)
+                tf = readVelocityWithGraphBinary(filename1, DomainId, inp,
+                                                 CLactual, iproc);
+            else
+                tf = readVelocityWithGraph(filename1, DomainId, inp, CLactual);
+            if (!tf)
+                return 0;
         }
         world.barrier();
         printFilesGraphV2(CLactual, inp, DomainId, actualDom);
@@ -927,11 +1325,18 @@ int main(int argc, char* argv[])
         std::vector< PntVel> my_data;
         for (int iproc = 0; iproc < inp.NinitDom; ++iproc) {
             std::string filename = inp.prefix + num2Padstr(iproc, inp.Nzeros) + inp.suffix;
-            tf = readVelocityFiles(filename, my_data, DomainId, expandedDom, actualDom, inp);
+            if (inputFormat == InputFormat::BINARY)
+                tf = readVelocityFilesBinary(filename, my_data, DomainId,
+                                             expandedDom, actualDom, inp, iproc);
+            else
+                tf = readVelocityFiles(filename, my_data, DomainId,
+                                       expandedDom, actualDom, inp);
+            if (!tf)
+                return 0;
         }
 
         std::cout << "____ Processor " << DomainId << " is printing..." << std::endl;
-        std::string outfilename = inp.NewPrefix + num2Padstr(DomainId, inp.Nzeros) + inp.suffix;
+        std::string outfilename = inp.NewPrefix + num2Padstr(DomainId, inp.Nzeros) + inp.outputSuffix;
         std::ofstream outstream;
         outstream.open(outfilename.c_str());
         for (std::vector<PntVel>::iterator it = my_data.begin(); it != my_data.end(); ++it) {
