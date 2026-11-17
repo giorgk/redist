@@ -55,7 +55,7 @@ contain spaces.
 The input file has exactly five logical lines:
 
 ```text
-Nproc prefix leadingZeros suffix [useGraph [iter]] [inputFormat [outputFormat | outputSuffix [outputFormat]]]
+Nproc prefix leadingZeros suffix [useGraph [iter]] [inputFormat [outputFormat | outputSuffix [outputFormat]]] [outputWriteBatchSize outputWriteMaxAttempts outputWriteRetryDelaySeconds]
 Ndata NprintData Col1 Col2 ...
 Ndigit1 Ndigit2 ...
 ActualDomain ExpandedDomain
@@ -66,11 +66,13 @@ The brackets above indicate optional fields; do not type the brackets. When
 specifying `inputFormat`, also specify `useGraph`. When `useGraph` is nonzero,
 `iter` is required and comes before `inputFormat`. `outputFormat` can be
 supplied directly after `inputFormat`, or after an explicit `outputSuffix`.
+The three output-write controls are optional but, when supplied, must all be
+present after an explicit `outputFormat`.
 
 ### Line 1: source files, graph mode, and input format
 
 ```text
-Nproc prefix leadingZeros suffix [useGraph [iter]] [inputFormat [outputFormat | outputSuffix [outputFormat]]]
+Nproc prefix leadingZeros suffix [useGraph [iter]] [inputFormat [outputFormat | outputSuffix [outputFormat]]] [outputWriteBatchSize outputWriteMaxAttempts outputWriteRetryDelaySeconds]
 ```
 
 | Option | Required | Meaning |
@@ -84,6 +86,9 @@ Nproc prefix leadingZeros suffix [useGraph [iter]] [inputFormat [outputFormat | 
 | `inputFormat` | No | `ascii`, `binary`, or `auto` (case-insensitive). The default is `auto`: a suffix ending in `.bin` selects binary; every other suffix selects ASCII. This controls only the source reader. |
 | `outputSuffix` | No | Suffix for redistributed velocity files. It must appear before `outputFormat` when both are supplied. With ASCII output, the default reuses `suffix` and removes a final `.bin` from binary input. With binary output, the default reuses `suffix` and appends `.bin` if needed. An explicit suffix is used exactly as written. |
 | `outputFormat` | No | `ascii` or `binary` (case-insensitive). The default is `ascii`, preserving legacy behavior. If this token immediately follows `inputFormat`, the suffix is derived automatically. Input and output formats are independent. |
+| `outputWriteBatchSize` | No | Maximum number of redist MPI ranks allowed to write output simultaneously. The default is `1`. Values must be at least `1`. |
+| `outputWriteMaxAttempts` | No | Maximum write-close-readback attempts for each output batch. The default is `3`. Values must be at least `1`. |
+| `outputWriteRetryDelaySeconds` | No | Seconds all MPI ranks wait before retrying a failed output batch. The default is `10`; `0` disables the delay. |
 
 Examples of valid first lines:
 
@@ -109,12 +114,20 @@ Examples of valid first lines:
 # Binary input and binary output; output suffix derives as .vel.bin
 8 output/model_4redist_ 4 .vel.bin 1 2 binary binary
 
+# Binary input/output with one writer, seven attempts, and a 10-second delay
+128 output/model_4redist_ 4 .vel.bin 1 2 binary binary 1 7 10
+
 # ASCII input, explicit binary output suffix, and binary output
 8 output/model_4redist_ 4 .vel 1 2 ascii .ich.bin binary
 ```
 
 The `#` descriptions in this example are explanatory only. Do not put them in
 an actual configuration file.
+
+For a network filesystem, start with `outputWriteBatchSize = 1`. Increasing it
+can improve throughput, but also increases simultaneous data flushes and file
+open/close operations. The setting controls only final output writing; all
+redist ranks still participate in reading and redistribution.
 
 When graph mode is enabled, source graph names are derived from `inputFormat`
 independently of `suffix`:
@@ -302,6 +315,32 @@ read or produced, and `iter` is not used.
 `outputFormat` controls both the velocity encoding and, when graph mode is
 enabled, the graph encoding. The two files of one rank always use the same
 encoding.
+
+### Verified and batched output
+
+Final output is written in MPI-rank batches controlled by
+`outputWriteBatchSize`. A rank explicitly flushes and closes its velocity file
+and, in graph mode, its graph file. It then reopens the files and verifies their
+complete contents before the batch can advance:
+
+- ASCII records are compared line-by-line with the generated output.
+- Binary velocity headers, source-column metadata, coordinates, owners, data
+  values, record counts, and end-of-file position are checked.
+- Binary graph headers, cell centers, neighbor IDs, velocity IDs, record
+  counts, and end-of-file position are checked.
+
+All ranks participate in a collective success check. If any writer fails, the
+entire batch waits `outputWriteRetryDelaySeconds` and is rewritten, up to
+`outputWriteMaxAttempts`. A permanent failure returns a nonzero program exit
+status and prevents later batches from writing. File-open and close errors
+include the operating-system `errno` number and message when available.
+
+Successful files are reported only after readback verification, for example:
+
+```text
+    Rank 0 wrote and verified velocity file: output/model_0000.vel.bin after 1 attempt
+    Rank 0 wrote and verified graph file: output/model_0000.grph.bin after 1 attempt
+```
 
 ### ASCII output
 

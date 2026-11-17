@@ -14,6 +14,10 @@
 #include <algorithm>
 #include <cctype>
 #include <stdexcept>
+#include <cerrno>
+#include <chrono>
+#include <cstdlib>
+#include <thread>
 
 //#include <chrono>
 //#include <ctime>
@@ -291,6 +295,9 @@ struct inputs {
 
     bool UseGraph = false;
     int overlapIter = 0;
+    unsigned int outputWriteBatchSize = 1;
+    unsigned int outputWriteMaxAttempts = 3;
+    unsigned int outputWriteRetryDelaySeconds = 10;
 
 };
 
@@ -390,7 +397,9 @@ bool readInputFile(std::string filename, inputs& input) {
 
             // Backward compatible optional fields:
             //   ... useGraph [overlapIter]
-            //       [inputFormat [outputSuffix] [outputFormat]]
+            //       [inputFormat [outputSuffix] [outputFormat]
+            //        [outputWriteBatchSize outputWriteMaxAttempts
+            //         outputWriteRetryDelaySeconds]]
             // If the token following inputFormat is ascii or binary, it is
             // treated as outputFormat and the output suffix is derived.
             std::string format;
@@ -432,6 +441,30 @@ bool readInputFile(std::string filename, inputs& input) {
                         }
                     }
                 }
+            }
+
+            if (inp >> input.outputWriteBatchSize) {
+                if (!(inp >> input.outputWriteMaxAttempts >>
+                      input.outputWriteRetryDelaySeconds)) {
+                    std::cout << "Output write controls require three integers: "
+                                 "batch size, maximum attempts, and retry delay seconds."
+                              << std::endl;
+                    return false;
+                }
+                std::string extraToken;
+                if (inp >> extraToken) {
+                    std::cout << "Unexpected token after output write controls: "
+                              << extraToken << std::endl;
+                    return false;
+                }
+            }
+
+            if (input.outputWriteBatchSize == 0 ||
+                input.outputWriteMaxAttempts == 0) {
+                std::cout << "Output write batch size and maximum attempts must "
+                             "both be at least 1."
+                          << std::endl;
+                return false;
             }
 
             if (input.outputSuffix.empty()) {
@@ -506,9 +539,92 @@ bool writeMagic(std::ostream& output, const char magic[8]) {
 
 void reportWrittenFile(int rank,
                        const char* fileKind,
-                       const std::string& filename) {
-    std::cout << "Processor " << rank << " wrote " << fileKind
-              << " file: " << filename << std::endl;
+                       const std::string& filename,
+                       unsigned int attempt) {
+    std::cout << "    Rank " << rank << " wrote and verified " << fileKind
+              << " file: " << filename << " after " << attempt << ' '
+              << (attempt == 1 ? "attempt" : "attempts") << std::endl;
+}
+
+std::string systemErrorMessage(int errorNumber) {
+#ifdef _WIN32
+    char buffer[256] = {0};
+    if (strerror_s(buffer, sizeof(buffer), errorNumber) == 0)
+        return std::string(buffer);
+    return std::string("unknown operating-system error");
+#else
+    return std::string(std::strerror(errorNumber));
+#endif
+}
+
+void reportFileError(int rank,
+                     const std::string& action,
+                     const std::string& filename,
+                     int errorNumber) {
+    std::cerr << "    Rank " << rank << ' ' << action << ' ' << filename;
+    if (errorNumber != 0)
+        std::cerr << " (errno " << errorNumber << ": "
+                  << systemErrorMessage(errorNumber) << ')';
+    else
+        std::cerr << " (no operating-system error code was reported)";
+    std::cerr << std::endl;
+}
+
+bool closeOutputFile(std::ofstream& output,
+                     const std::string& filename,
+                     int rank) {
+    errno = 0;
+    output.flush();
+    const bool flushed = output.good();
+    output.close();
+    if (!flushed || output.fail()) {
+        const int errorNumber = errno;
+        reportFileError(rank, "failed while flushing or closing", filename,
+                        errorNumber);
+        return false;
+    }
+    return true;
+}
+
+bool reportWriteFailure(int rank, const std::string& filename) {
+    const int errorNumber = errno;
+    reportFileError(rank, "failed while writing", filename, errorNumber);
+    return false;
+}
+
+bool binaryFileEndsHere(std::ifstream& input) {
+    char extra = 0;
+    input.read(&extra, 1);
+    return input.eof() && input.gcount() == 0;
+}
+
+bool verifyAsciiFile(const std::string& filename,
+                     const std::vector<std::string>& expectedLines,
+                     int rank,
+                     const char* fileKind) {
+    errno = 0;
+    std::ifstream input(filename.c_str());
+    if (!input.good()) {
+        const int errorNumber = errno;
+        reportFileError(rank, "could not reopen for verification", filename,
+                        errorNumber);
+        return false;
+    }
+    std::string line;
+    for (std::size_t i = 0; i < expectedLines.size(); ++i) {
+        if (!std::getline(input, line) || line != expectedLines[i]) {
+            std::cerr << "    Rank " << rank << " failed " << fileKind
+                      << " readback at record " << i << " in " << filename
+                      << std::endl;
+            return false;
+        }
+    }
+    if (std::getline(input, line)) {
+        std::cerr << "    Rank " << rank << " found extra " << fileKind
+                  << " data in " << filename << std::endl;
+        return false;
+    }
+    return true;
 }
 
 bool readBinaryString(std::istream& input, std::string& value) {
@@ -925,43 +1041,263 @@ bool writeRedistributedVelocityRecord(std::ofstream& output,
     return true;
 }
 
+struct BinaryGraphVelocity {
+    const PntVel* point;
+    int owner;
+};
+
+bool verifyRedistributedVelocityRecord(std::ifstream& input,
+                                       const PntVel& expectedPoint,
+                                       int expectedOwner,
+                                       const inputs& config) {
+    double x = 0.0, y = 0.0, z = 0.0;
+    std::int32_t owner = 0;
+    if (!readPod(input, x) || !readPod(input, y) || !readPod(input, z) ||
+        !readPod(input, owner) || x != expectedPoint.x ||
+        y != expectedPoint.y || z != expectedPoint.z ||
+        owner != static_cast<std::int32_t>(expectedOwner))
+        return false;
+
+    for (int i = 0; i < config.Nprint; ++i) {
+        const int sourceIndex = config.printOrder[i] - 1;
+        double value = 0.0;
+        if (sourceIndex < 0 ||
+            sourceIndex >= static_cast<int>(expectedPoint.data.size()) ||
+            !readPod(input, value) ||
+            value != expectedPoint.data[sourceIndex])
+            return false;
+    }
+    return true;
+}
+
+bool verifyRedistributedVelocityHeader(std::ifstream& input,
+                                       const inputs& config,
+                                       int rank,
+                                       int nproc,
+                                       std::uint64_t expectedPoints) {
+    const char expectedMagic[8] = {'R','D','I','V','E','L','1','\0'};
+    char magic[8] = {0,0,0,0,0,0,0,0};
+    std::uint32_t version = 0, dimension = 0, fileRank = 0;
+    std::uint32_t fileNproc = 0, nData = 0;
+    std::uint64_t nPoints = 0;
+    input.read(magic, 8);
+    if (!input.good() || std::memcmp(magic, expectedMagic, 8) != 0 ||
+        !readPod(input, version) || !readPod(input, dimension) ||
+        !readPod(input, fileRank) || !readPod(input, fileNproc) ||
+        !readPod(input, nData) || !readPod(input, nPoints) ||
+        version != 1 || dimension != 3 ||
+        fileRank != static_cast<std::uint32_t>(rank) ||
+        fileNproc != static_cast<std::uint32_t>(nproc) ||
+        nData != static_cast<std::uint32_t>(config.Nprint) ||
+        nPoints != expectedPoints)
+        return false;
+
+    for (int i = 0; i < config.Nprint; ++i) {
+        std::uint32_t sourceColumn = 0;
+        if (!readPod(input, sourceColumn) ||
+            sourceColumn != static_cast<std::uint32_t>(config.printOrder[i]))
+            return false;
+    }
+    return true;
+}
+
+bool verifyRedistributedVelocityBinary(
+    const std::string& filename,
+    const std::vector<PntVel>& points,
+    const inputs& config,
+    int rank,
+    int nproc) {
+    errno = 0;
+    std::ifstream input(filename.c_str(), std::ios::in | std::ios::binary);
+    if (!input.good()) {
+        const int errorNumber = errno;
+        reportFileError(rank, "could not reopen for verification", filename,
+                        errorNumber);
+        return false;
+    }
+    if (!verifyRedistributedVelocityHeader(
+            input, config, rank, nproc,
+            static_cast<std::uint64_t>(points.size()))) {
+        std::cerr << "    Rank " << rank
+                  << " failed velocity header readback for " << filename
+                  << std::endl;
+        return false;
+    }
+    for (std::size_t i = 0; i < points.size(); ++i) {
+        if (!verifyRedistributedVelocityRecord(
+                input, points[i], points[i].proc, config)) {
+            std::cerr << "    Rank " << rank
+                      << " failed velocity readback at record " << i
+                      << " in " << filename << std::endl;
+            return false;
+        }
+    }
+    if (!binaryFileEndsHere(input)) {
+        std::cerr << "    Rank " << rank
+                  << " found extra velocity data in " << filename
+                  << std::endl;
+        return false;
+    }
+    return true;
+}
+
+bool verifyRedistributedVelocityBinary(
+    const std::string& filename,
+    const std::vector<BinaryGraphVelocity>& points,
+    const inputs& config,
+    int rank,
+    int nproc) {
+    errno = 0;
+    std::ifstream input(filename.c_str(), std::ios::in | std::ios::binary);
+    if (!input.good()) {
+        const int errorNumber = errno;
+        reportFileError(rank, "could not reopen for verification", filename,
+                        errorNumber);
+        return false;
+    }
+    if (!verifyRedistributedVelocityHeader(
+            input, config, rank, nproc,
+            static_cast<std::uint64_t>(points.size()))) {
+        std::cerr << "    Rank " << rank
+                  << " failed velocity header readback for " << filename
+                  << std::endl;
+        return false;
+    }
+    for (std::size_t i = 0; i < points.size(); ++i) {
+        if (!verifyRedistributedVelocityRecord(
+                input, *points[i].point, points[i].owner, config)) {
+            std::cerr << "    Rank " << rank
+                      << " failed velocity readback at record " << i
+                      << " in " << filename << std::endl;
+            return false;
+        }
+    }
+    if (!binaryFileEndsHere(input)) {
+        std::cerr << "    Rank " << rank
+                  << " found extra velocity data in " << filename
+                  << std::endl;
+        return false;
+    }
+    return true;
+}
+
 bool writeRedistributedVelocityBinary(const std::string& filename,
                                       const std::vector<PntVel>& points,
                                       const inputs& input,
                                       int rank,
                                       int nproc) {
+    errno = 0;
     std::ofstream output(filename.c_str(),
                          std::ios::out | std::ios::binary | std::ios::trunc);
     if (!output.good()) {
-        std::cout << "Can't open the binary output file " << filename << std::endl;
+        const int errorNumber = errno;
+        reportFileError(rank, "could not open for writing", filename,
+                        errorNumber);
         return false;
     }
 
     if (!writeRedistributedVelocityHeader(
             output, input, rank, nproc,
             static_cast<std::uint64_t>(points.size())))
-        return false;
+        return reportWriteFailure(rank, filename);
 
     for (std::vector<PntVel>::const_iterator it = points.begin();
          it != points.end(); ++it) {
         if (!writeRedistributedVelocityRecord(output, *it, it->proc, input))
-            return false;
+            return reportWriteFailure(rank, filename);
     }
 
-    output.close();
-    if (!output.good()) {
-        std::cout << "Failed while writing binary velocity file "
+    if (!closeOutputFile(output, filename, rank))
+        return false;
+    return verifyRedistributedVelocityBinary(filename, points, input,
+                                             rank, nproc);
+}
+
+struct BinaryOutputGraphRecord {
+    double x;
+    double y;
+    double z;
+    std::vector<std::uint64_t> neighborIds;
+    std::vector<std::uint64_t> velocityIds;
+};
+
+bool verifyRedistributedGraphBinary(
+    const std::string& filename,
+    const std::vector<BinaryOutputGraphRecord>& records,
+    std::uint64_t expectedVelocityPoints,
+    int rank,
+    int nproc) {
+    errno = 0;
+    std::ifstream input(filename.c_str(), std::ios::in | std::ios::binary);
+    if (!input.good()) {
+        const int errorNumber = errno;
+        reportFileError(rank, "could not reopen for verification", filename,
+                        errorNumber);
+        return false;
+    }
+
+    const char expectedMagic[8] = {'R','D','I','G','R','P','1','\0'};
+    char magic[8] = {0,0,0,0,0,0,0,0};
+    std::uint32_t version = 0, dimension = 0, fileRank = 0, fileNproc = 0;
+    std::uint64_t nCells = 0, nVelocityPoints = 0;
+    input.read(magic, 8);
+    if (!input.good() || std::memcmp(magic, expectedMagic, 8) != 0 ||
+        !readPod(input, version) || !readPod(input, dimension) ||
+        !readPod(input, fileRank) || !readPod(input, fileNproc) ||
+        !readPod(input, nCells) || !readPod(input, nVelocityPoints) ||
+        version != 1 || dimension != 3 ||
+        fileRank != static_cast<std::uint32_t>(rank) ||
+        fileNproc != static_cast<std::uint32_t>(nproc) ||
+        nCells != static_cast<std::uint64_t>(records.size()) ||
+        nVelocityPoints != expectedVelocityPoints) {
+        std::cerr << "    Rank " << rank
+                  << " failed graph header readback for " << filename
+                  << std::endl;
+        return false;
+    }
+
+    for (std::size_t recordIndex = 0;
+         recordIndex < records.size(); ++recordIndex) {
+        const BinaryOutputGraphRecord& expected = records[recordIndex];
+        double x = 0.0, y = 0.0, z = 0.0;
+        std::uint32_t nNeighbors = 0, nCellVelocities = 0;
+        if (!readPod(input, x) || !readPod(input, y) ||
+            !readPod(input, z) || !readPod(input, nNeighbors) ||
+            !readPod(input, nCellVelocities) || x != expected.x ||
+            y != expected.y || z != expected.z ||
+            nNeighbors != expected.neighborIds.size() ||
+            nCellVelocities != expected.velocityIds.size()) {
+            std::cerr << "    Rank " << rank
+                      << " failed graph readback at record " << recordIndex
+                      << " in " << filename << std::endl;
+            return false;
+        }
+        for (std::size_t i = 0; i < expected.neighborIds.size(); ++i) {
+            std::uint64_t id = 0;
+            if (!readPod(input, id) || id != expected.neighborIds[i]) {
+                std::cerr << "    Rank " << rank
+                          << " failed graph neighbor readback at record "
+                          << recordIndex << " in " << filename << std::endl;
+                return false;
+            }
+        }
+        for (std::size_t i = 0; i < expected.velocityIds.size(); ++i) {
+            std::uint64_t id = 0;
+            if (!readPod(input, id) || id != expected.velocityIds[i]) {
+                std::cerr << "    Rank " << rank
+                          << " failed graph velocity-ID readback at record "
+                          << recordIndex << " in " << filename << std::endl;
+                return false;
+            }
+        }
+    }
+    if (!binaryFileEndsHere(input)) {
+        std::cerr << "    Rank " << rank << " found extra graph data in "
                   << filename << std::endl;
         return false;
     }
-    reportWrittenFile(rank, "velocity", filename);
     return true;
 }
-
-struct BinaryGraphVelocity {
-    const PntVel* point;
-    int owner;
-};
 
 bool printFilesGraphBinary(cellIdList& CLact,
                            inputs& input,
@@ -1010,38 +1346,69 @@ bool printFilesGraphBinary(cellIdList& CLact,
     const std::string graphFilename =
         input.NewPrefix + num2Padstr(rank, input.Nzeros) + ".grph.bin";
 
+    std::vector<BinaryOutputGraphRecord> graphRecords;
+    graphRecords.reserve(static_cast<std::size_t>(nCells));
+    for (L1map::iterator itLev1 = CLact.CellIds.begin();
+         itLev1 != CLact.CellIds.end(); ++itLev1) {
+        for (L2map::iterator itLev2 = itLev1->second.begin();
+             itLev2 != itLev1->second.end(); ++itLev2) {
+            for (L3map::iterator itLev3 = itLev2->second.begin();
+                 itLev3 != itLev2->second.end(); ++itLev3) {
+                BinaryOutputGraphRecord record;
+                record.x = itLev3->second.x;
+                record.y = itLev3->second.y;
+                record.z = itLev3->second.z;
+                for (std::size_t i = 0;
+                     i < itLev3->second.neighborCells.size(); ++i) {
+                    if (CLact.find(itLev3->second.neighborCells[i]))
+                        record.neighborIds.push_back(
+                            static_cast<std::uint64_t>(
+                                CLact.itLev3->second.id));
+                }
+                for (std::size_t i = 0;
+                     i < itLev3->second.VelIds.size(); ++i)
+                    record.velocityIds.push_back(
+                        static_cast<std::uint64_t>(
+                            itLev3->second.VelIds[i]));
+                graphRecords.push_back(record);
+            }
+        }
+    }
+
+    errno = 0;
     std::ofstream velocityStream(
         velocityFilename.c_str(),
         std::ios::out | std::ios::binary | std::ios::trunc);
     if (!velocityStream.good()) {
-        std::cout << "Can't open the binary output file "
-                  << velocityFilename << std::endl;
+        const int errorNumber = errno;
+        reportFileError(rank, "could not open for writing", velocityFilename,
+                        errorNumber);
         return false;
     }
     if (!writeRedistributedVelocityHeader(
             velocityStream, input, rank, nproc,
             static_cast<std::uint64_t>(velocityRecords.size())))
-        return false;
+        return reportWriteFailure(rank, velocityFilename);
     for (std::size_t i = 0; i < velocityRecords.size(); ++i) {
         if (!writeRedistributedVelocityRecord(
                 velocityStream, *velocityRecords[i].point,
                 velocityRecords[i].owner, input))
-            return false;
+            return reportWriteFailure(rank, velocityFilename);
     }
-    velocityStream.close();
-    if (!velocityStream.good()) {
-        std::cout << "Failed while writing binary velocity file "
-                  << velocityFilename << std::endl;
+    if (!closeOutputFile(velocityStream, velocityFilename, rank))
         return false;
-    }
-    reportWrittenFile(rank, "velocity", velocityFilename);
+    if (!verifyRedistributedVelocityBinary(
+            velocityFilename, velocityRecords, input, rank, nproc))
+        return false;
 
+    errno = 0;
     std::ofstream graphStream(
         graphFilename.c_str(),
         std::ios::out | std::ios::binary | std::ios::trunc);
     if (!graphStream.good()) {
-        std::cout << "Can't open the binary output file "
-                  << graphFilename << std::endl;
+        const int errorNumber = errno;
+        reportFileError(rank, "could not open for writing", graphFilename,
+                        errorNumber);
         return false;
     }
 
@@ -1059,55 +1426,42 @@ bool printFilesGraphBinary(cellIdList& CLact,
         !writePod(graphStream, outputNproc) ||
         !writePod(graphStream, nCells) ||
         !writePod(graphStream, nVelocityPoints))
-        return false;
+        return reportWriteFailure(rank, graphFilename);
 
-    for (L1map::iterator itLev1 = CLact.CellIds.begin();
-         itLev1 != CLact.CellIds.end(); ++itLev1) {
-        for (L2map::iterator itLev2 = itLev1->second.begin();
-             itLev2 != itLev1->second.end(); ++itLev2) {
-            for (L3map::iterator itLev3 = itLev2->second.begin();
-                 itLev3 != itLev2->second.end(); ++itLev3) {
-                std::vector<std::uint64_t> neighborIds;
-                for (std::size_t i = 0;
-                     i < itLev3->second.neighborCells.size(); ++i) {
-                    if (CLact.find(itLev3->second.neighborCells[i]))
-                        neighborIds.push_back(
-                            static_cast<std::uint64_t>(CLact.itLev3->second.id));
-                }
-
-                const std::uint32_t nNeighbors =
-                    static_cast<std::uint32_t>(neighborIds.size());
+    for (std::size_t recordIndex = 0;
+         recordIndex < graphRecords.size(); ++recordIndex) {
+                const BinaryOutputGraphRecord& record =
+                    graphRecords[recordIndex];
+                const std::uint32_t nNeighbors = static_cast<std::uint32_t>(
+                    record.neighborIds.size());
                 const std::uint32_t nCellVelocities =
-                    static_cast<std::uint32_t>(itLev3->second.VelIds.size());
-                if (!writePod(graphStream, itLev3->second.x) ||
-                    !writePod(graphStream, itLev3->second.y) ||
-                    !writePod(graphStream, itLev3->second.z) ||
+                    static_cast<std::uint32_t>(record.velocityIds.size());
+                if (!writePod(graphStream, record.x) ||
+                    !writePod(graphStream, record.y) ||
+                    !writePod(graphStream, record.z) ||
                     !writePod(graphStream, nNeighbors) ||
                     !writePod(graphStream, nCellVelocities))
-                    return false;
+                    return reportWriteFailure(rank, graphFilename);
 
-                for (std::size_t i = 0; i < neighborIds.size(); ++i) {
-                    if (!writePod(graphStream, neighborIds[i]))
-                        return false;
+                for (std::size_t i = 0;
+                     i < record.neighborIds.size(); ++i) {
+                    if (!writePod(graphStream, record.neighborIds[i]))
+                        return reportWriteFailure(rank, graphFilename);
                 }
                 for (std::size_t i = 0;
-                     i < itLev3->second.VelIds.size(); ++i) {
-                    const std::uint64_t velocityId =
-                        static_cast<std::uint64_t>(itLev3->second.VelIds[i]);
-                    if (!writePod(graphStream, velocityId))
-                        return false;
+                     i < record.velocityIds.size(); ++i) {
+                    if (!writePod(graphStream, record.velocityIds[i]))
+                        return reportWriteFailure(rank, graphFilename);
                 }
-            }
-        }
     }
 
-    graphStream.close();
-    if (!graphStream.good()) {
-        std::cout << "Failed while writing binary graph file "
-                  << graphFilename << std::endl;
+    if (!closeOutputFile(graphStream, graphFilename, rank))
         return false;
-    }
-    reportWrittenFile(rank, "graph", graphFilename);
+    if (!verifyRedistributedGraphBinary(
+            graphFilename, graphRecords,
+            static_cast<std::uint64_t>(velocityRecords.size()), rank,
+            nproc))
+        return false;
 
     boost::chrono::duration<double> seconds =
         boost::chrono::nanoseconds(timer.elapsed().user);
@@ -1132,6 +1486,7 @@ bool printFilesGraphV2(cellIdList& CLact, inputs& input, int rank, DomainListPol
             for (itLev3 = itLev2->second.begin(); itLev3 != itLev2->second.end(); ++ itLev3){
                 itLev3->second.id = cellIdx;
                 cellIdx++;
+                itLev3->second.VelIds.clear();
                 for (std::size_t i = 0;
                      i < itLev3->second.CellVelocities.size(); ++i){
                     itLev3->second.VelIds.push_back(velIdx);
@@ -1142,24 +1497,30 @@ bool printFilesGraphV2(cellIdList& CLact, inputs& input, int rank, DomainListPol
     }
 
     // Print the velocity and the Cell graph files
-    std::cout << "____ Processor " << rank << " is printing Velocity and Graph files ..." << std::endl;
     std::string graphfilename = input.NewPrefix + num2Padstr(rank, input.Nzeros) + ".grph";
-    std::ofstream graphstream;
-    graphstream.open(graphfilename.c_str());
+    errno = 0;
+    std::ofstream graphstream(graphfilename.c_str(),
+                              std::ios::out | std::ios::trunc);
     if (!graphstream.good()) {
-        std::cout << "Can't open the graph output file "
-                  << graphfilename << std::endl;
+        const int errorNumber = errno;
+        reportFileError(rank, "could not open for writing", graphfilename,
+                        errorNumber);
         return false;
     }
 
     std::string velfilename = input.NewPrefix + num2Padstr(rank, input.Nzeros) + input.outputSuffix;
-    std::ofstream velstream;
-    velstream.open(velfilename.c_str());
+    errno = 0;
+    std::ofstream velstream(velfilename.c_str(),
+                            std::ios::out | std::ios::trunc);
     if (!velstream.good()) {
-        std::cout << "Can't open the velocity output file "
-                  << velfilename << std::endl;
+        const int errorNumber = errno;
+        reportFileError(rank, "could not open for writing", velfilename,
+                        errorNumber);
         return false;
     }
+
+    std::vector<std::string> velocityLines;
+    std::vector<std::string> graphLines;
 
     for (itLev1 = CLact.CellIds.begin(); itLev1 != CLact.CellIds.end(); ++itLev1){
         for (itLev2 = itLev1->second.begin(); itLev2 != itLev1->second.end(); ++itLev2){
@@ -1176,16 +1537,20 @@ bool printFilesGraphV2(cellIdList& CLact, inputs& input, int rank, DomainListPol
                                   << " is not in any processor polygons" << std::endl;
                     }
                     else{
-                        velstream << std::setprecision(3) << std::fixed
-                                  << itLev3->second.CellVelocities[i].x << " "
-                                  << itLev3->second.CellVelocities[i].y << " "
-                                  << itLev3->second.CellVelocities[i].z << " "
-                                  << proc << " ";
+                        std::ostringstream velocityLine;
+                        velocityLine << std::setprecision(3) << std::fixed
+                                     << itLev3->second.CellVelocities[i].x << " "
+                                     << itLev3->second.CellVelocities[i].y << " "
+                                     << itLev3->second.CellVelocities[i].z << " "
+                                     << proc << " ";
                         for (int j = 0; j < input.Nprint; ++j){
-                            velstream << std::setprecision(input.prec[j]) << std::fixed
-                                      << itLev3->second.CellVelocities[i].data[input.printOrder[j] - 1] << " ";
+                            velocityLine << std::setprecision(input.prec[j])
+                                         << std::fixed
+                                         << itLev3->second.CellVelocities[i].data[input.printOrder[j] - 1]
+                                         << " ";
                         }
-                        velstream << std::endl;
+                        velocityLines.push_back(velocityLine.str());
+                        velstream << velocityLines.back() << '\n';
                     }
                 }
 
@@ -1197,40 +1562,36 @@ bool printFilesGraphV2(cellIdList& CLact, inputs& input, int rank, DomainListPol
                     }
                 }
                 // Print the cell graph
-                graphstream << std::setprecision(3) << std::fixed
-                            << itLev3->second.x << " "
-                            << itLev3->second.y << " "
-                            << itLev3->second.z << " "
-                            << tmp.size() << " "
-                            << itLev3->second.CellVelocities.size() << " ";
+                std::ostringstream graphLine;
+                graphLine << std::setprecision(3) << std::fixed
+                          << itLev3->second.x << " "
+                          << itLev3->second.y << " "
+                          << itLev3->second.z << " "
+                          << tmp.size() << " "
+                          << itLev3->second.CellVelocities.size() << " ";
                 for(std::size_t i = 0; i < tmp.size(); ++i){
-                    graphstream << tmp[i] << " ";
+                    graphLine << tmp[i] << " ";
                 }
                 for (std::size_t i = 0; i < itLev3->second.VelIds.size(); ++i){
-                    graphstream << itLev3->second.VelIds[i] << " ";
+                    graphLine << itLev3->second.VelIds[i] << " ";
                 }
-                graphstream << std::endl;
+                graphLines.push_back(graphLine.str());
+                graphstream << graphLines.back() << '\n';
             }
         }
     }
-    graphstream.close();
-    velstream.close();
-    const bool graphWritten = graphstream.good();
-    const bool velocityWritten = velstream.good();
-    if (velocityWritten)
-        reportWrittenFile(rank, "velocity", velfilename);
-    else
-        std::cout << "Failed while writing velocity file "
-                  << velfilename << std::endl;
-    if (graphWritten)
-        reportWrittenFile(rank, "graph", graphfilename);
-    else
-        std::cout << "Failed while writing graph file "
-                  << graphfilename << std::endl;
+    const bool graphWritten = closeOutputFile(
+        graphstream, graphfilename, rank);
+    const bool velocityWritten = closeOutputFile(
+        velstream, velfilename, rank);
+    const bool velocityVerified = velocityWritten && verifyAsciiFile(
+        velfilename, velocityLines, rank, "velocity");
+    const bool graphVerified = graphWritten && verifyAsciiFile(
+        graphfilename, graphLines, rank, "graph");
     boost::chrono::duration<double> seconds = boost::chrono::nanoseconds(timer.elapsed().user);
     std::cout << ". . . .Proc " << rank << " spend " << seconds.count() / 60 << " min to print "
               << cellIdx << " cells and " << velIdx << " velocity points" << std::endl;
-    return graphWritten && velocityWritten;
+    return graphVerified && velocityVerified;
 }
 
 void printFilesGraph(cellIdList& CLact, inputs& input, int rank, DomainListPoly& dpoly){
@@ -1596,6 +1957,71 @@ bool readDomain(std::string filename, DomainListPoly& dpoly) {
     return outcome;
 }
 
+template <typename Writer, typename SuccessReporter>
+bool writeOutputInBatches(boost::mpi::communicator& world,
+                          const inputs& input,
+                          Writer writer,
+                          SuccessReporter reportSuccess) {
+    const unsigned int nproc = static_cast<unsigned int>(world.size());
+    const unsigned int nBatches =
+        (nproc + input.outputWriteBatchSize - 1) /
+        input.outputWriteBatchSize;
+
+    for (unsigned int batch = 0; batch < nBatches; ++batch) {
+        const unsigned int firstRank = batch * input.outputWriteBatchSize;
+        const unsigned int lastRank = std::min(
+            nproc, firstRank + input.outputWriteBatchSize);
+        const bool rankInBatch =
+            static_cast<unsigned int>(world.rank()) >= firstRank &&
+            static_cast<unsigned int>(world.rank()) < lastRank;
+        bool batchVerified = false;
+        unsigned int attempt = 0;
+
+        while (!batchVerified &&
+               attempt < input.outputWriteMaxAttempts) {
+            ++attempt;
+            const bool localVerified = !rankInBatch || writer();
+            const int localFailure = localVerified ? 0 : 1;
+            int batchFailure = 0;
+            MPI_Allreduce(&localFailure, &batchFailure, 1, MPI_INT, MPI_MAX,
+                          world);
+            batchVerified = batchFailure == 0;
+
+            if (!batchVerified &&
+                attempt < input.outputWriteMaxAttempts) {
+                if (world.rank() == 0)
+                    std::cout << "Output batch " << batch
+                              << " failed verification on attempt "
+                              << attempt << " of "
+                              << input.outputWriteMaxAttempts
+                              << "; waiting "
+                              << input.outputWriteRetryDelaySeconds
+                              << " second(s) before rewriting the batch."
+                              << std::endl;
+                if (input.outputWriteRetryDelaySeconds > 0)
+                    std::this_thread::sleep_for(std::chrono::seconds(
+                        input.outputWriteRetryDelaySeconds));
+            }
+            world.barrier();
+        }
+
+        if (!batchVerified) {
+            if (world.rank() == 0)
+                std::cerr << "Output batch " << batch
+                          << " failed after "
+                          << input.outputWriteMaxAttempts
+                          << " attempts; redist is aborting without "
+                             "advancing to the next batch."
+                          << std::endl;
+            return false;
+        }
+        if (rankInBatch)
+            reportSuccess(attempt);
+        world.barrier();
+    }
+    return true;
+}
+
 
 
 int main(int argc, char* argv[])
@@ -1603,9 +2029,8 @@ int main(int argc, char* argv[])
     boost::mpi::environment env(argc, argv);
     boost::mpi::communicator world;
 
-    //if (world.rank() == 0){
-        std::cout << "Redist version 1.4" << std::endl;
-    //}
+    if (world.rank() == 0)
+        std::cout << "Redist version 1.5" << std::endl;
 
     //int DomainId = std::stoi(argv[2]);
     int DomainId = world.rank();
@@ -1613,28 +2038,42 @@ int main(int argc, char* argv[])
 
     //std::cout << argc << std::endl;
     //std::cout << argv[0] << std::endl;
+    if (argc < 2) {
+        if (world.rank() == 0)
+            std::cerr << "Usage: redist <configuration-file>" << std::endl;
+        return EXIT_FAILURE;
+    }
+
     inputs inp;
-    std::cout << "Current path: " << boost::filesystem::current_path() << std::endl;
+    if (world.rank() == 0)
+        std::cout << "Current path: " << boost::filesystem::current_path()
+                  << std::endl;
     bool tf = readInputFile(argv[1], inp);
     if (!tf)
-        return 0;
+        return EXIT_FAILURE;
 
     const InputFormat inputFormat = resolvedInputFormat(inp);
-    std::cout << "Input format: "
-              << (inputFormat == InputFormat::BINARY ? "binary" : "ascii")
-              << "; output format: "
-              << (inp.outputFormat == OutputFormat::BINARY ? "binary" : "ascii")
-              << "; redistributed Ichnos suffix: " << inp.outputSuffix
-              << std::endl;
+    if (world.rank() == 0)
+        std::cout << "Input format: "
+                  << (inputFormat == InputFormat::BINARY ? "binary" : "ascii")
+                  << "; output format: "
+                  << (inp.outputFormat == OutputFormat::BINARY ? "binary" : "ascii")
+                  << "; redistributed Ichnos suffix: " << inp.outputSuffix
+                  << "\nOutput write batch size: "
+                  << inp.outputWriteBatchSize
+                  << "; maximum attempts: " << inp.outputWriteMaxAttempts
+                  << "; retry delay: "
+                  << inp.outputWriteRetryDelaySeconds << " second(s)"
+                  << std::endl;
 
 
     DomainListPoly actualDom, expandedDom;
     tf = readDomain(inp.ActualDomainFile, actualDom);
     if (!tf)
-        return 0;
+        return EXIT_FAILURE;
     tf = readDomain(inp.ExpadnedDomainFile, expandedDom);
     if (!tf)
-        return 0;
+        return EXIT_FAILURE;
 
 
     if (inp.UseGraph){
@@ -1652,7 +2091,7 @@ int main(int argc, char* argv[])
                 tf = readCellGraphFiles(filename, CLactual, CLbuffer,
                                         DomainId, expandedDom, actualDom);
             if (!tf)
-                return 0;
+                return EXIT_FAILURE;
         }
         world.barrier();
         appendNeighborCells(CLactual, CLbuffer, inp);
@@ -1665,16 +2104,33 @@ int main(int argc, char* argv[])
             else
                 tf = readVelocityWithGraph(filename1, DomainId, inp, CLactual);
             if (!tf)
-                return 0;
+                return EXIT_FAILURE;
         }
         world.barrier();
-        if (inp.outputFormat == OutputFormat::BINARY)
-            tf = printFilesGraphBinary(CLactual, inp, DomainId,
-                                       world.size(), actualDom);
-        else
-            tf = printFilesGraphV2(CLactual, inp, DomainId, actualDom);
+        tf = writeOutputInBatches(
+            world, inp,
+            [&]() -> bool {
+                if (inp.outputFormat == OutputFormat::BINARY)
+                    return printFilesGraphBinary(
+                        CLactual, inp, DomainId, world.size(), actualDom);
+                return printFilesGraphV2(
+                    CLactual, inp, DomainId, actualDom);
+            },
+            [&](unsigned int attempt) {
+                const std::string velocityFilename =
+                    inp.NewPrefix + num2Padstr(DomainId, inp.Nzeros) +
+                    inp.outputSuffix;
+                const std::string graphFilename =
+                    inp.NewPrefix + num2Padstr(DomainId, inp.Nzeros) +
+                    (inp.outputFormat == OutputFormat::BINARY
+                         ? ".grph.bin" : ".grph");
+                reportWrittenFile(DomainId, "velocity", velocityFilename,
+                                  attempt);
+                reportWrittenFile(DomainId, "graph", graphFilename,
+                                  attempt);
+            });
         if (!tf)
-            return 0;
+            return EXIT_FAILURE;
     }
     else{
         std::vector< PntVel> my_data;
@@ -1687,42 +2143,51 @@ int main(int argc, char* argv[])
                 tf = readVelocityFiles(filename, my_data, DomainId,
                                        expandedDom, actualDom, inp);
             if (!tf)
-                return 0;
+                return EXIT_FAILURE;
         }
 
-        std::cout << "____ Processor " << DomainId << " is printing..." << std::endl;
         std::string outfilename = inp.NewPrefix + num2Padstr(DomainId, inp.Nzeros) + inp.outputSuffix;
-        if (inp.outputFormat == OutputFormat::BINARY) {
-            tf = writeRedistributedVelocityBinary(
-                outfilename, my_data, inp, DomainId, world.size());
-            if (!tf)
-                return 0;
-        }
-        else {
-            std::ofstream outstream;
-            outstream.open(outfilename.c_str());
-            if (!outstream.good()) {
-                std::cout << "Can't open the velocity output file "
-                          << outfilename << std::endl;
-                return 0;
-            }
-            for (std::vector<PntVel>::iterator it = my_data.begin(); it != my_data.end(); ++it) {
-                outstream << std::setprecision(3) << std::fixed
-                          << it->x << " " << it->y << " " << it->z << " " << it->proc << " ";
+        tf = writeOutputInBatches(
+            world, inp,
+            [&]() -> bool {
+                if (inp.outputFormat == OutputFormat::BINARY)
+                    return writeRedistributedVelocityBinary(
+                        outfilename, my_data, inp, DomainId, world.size());
 
-                for (int i = 0; i < inp.Nprint; i++){
-                    outstream << std::setprecision(inp.prec[i]) << std::fixed << it->data[ inp.printOrder[i] - 1 ] << " ";
+                errno = 0;
+                std::ofstream outstream(outfilename.c_str(),
+                                        std::ios::out | std::ios::trunc);
+                if (!outstream.good()) {
+                    const int errorNumber = errno;
+                    reportFileError(DomainId, "could not open for writing",
+                                    outfilename, errorNumber);
+                    return false;
                 }
-                outstream << std::endl;
-            }
-            outstream.close();
-            if (!outstream.good()) {
-                std::cout << "Failed while writing velocity file "
-                          << outfilename << std::endl;
-                return 0;
-            }
-            reportWrittenFile(DomainId, "velocity", outfilename);
-        }
+                std::vector<std::string> expectedLines;
+                expectedLines.reserve(my_data.size());
+                for (std::vector<PntVel>::iterator it = my_data.begin();
+                     it != my_data.end(); ++it) {
+                    std::ostringstream line;
+                    line << std::setprecision(3) << std::fixed
+                         << it->x << " " << it->y << " " << it->z
+                         << " " << it->proc << " ";
+                    for (int i = 0; i < inp.Nprint; i++)
+                        line << std::setprecision(inp.prec[i]) << std::fixed
+                             << it->data[inp.printOrder[i] - 1] << " ";
+                    expectedLines.push_back(line.str());
+                    outstream << expectedLines.back() << '\n';
+                }
+                if (!closeOutputFile(outstream, outfilename, DomainId))
+                    return false;
+                return verifyAsciiFile(outfilename, expectedLines, DomainId,
+                                       "velocity");
+            },
+            [&](unsigned int attempt) {
+                reportWrittenFile(DomainId, "velocity", outfilename,
+                                  attempt);
+            });
+        if (!tf)
+            return EXIT_FAILURE;
     }
 
 
