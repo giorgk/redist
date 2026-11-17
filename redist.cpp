@@ -504,6 +504,13 @@ bool writeMagic(std::ostream& output, const char magic[8]) {
     return output.good();
 }
 
+void reportWrittenFile(int rank,
+                       const char* fileKind,
+                       const std::string& filename) {
+    std::cout << "Processor " << rank << " wrote " << fileKind
+              << " file: " << filename << std::endl;
+}
+
 bool readBinaryString(std::istream& input, std::string& value) {
     std::uint32_t length = 0;
     if (!readPod(input, length))
@@ -947,6 +954,7 @@ bool writeRedistributedVelocityBinary(const std::string& filename,
                   << filename << std::endl;
         return false;
     }
+    reportWrittenFile(rank, "velocity", filename);
     return true;
 }
 
@@ -1026,6 +1034,7 @@ bool printFilesGraphBinary(cellIdList& CLact,
                   << velocityFilename << std::endl;
         return false;
     }
+    reportWrittenFile(rank, "velocity", velocityFilename);
 
     std::ofstream graphStream(
         graphFilename.c_str(),
@@ -1098,6 +1107,7 @@ bool printFilesGraphBinary(cellIdList& CLact,
                   << graphFilename << std::endl;
         return false;
     }
+    reportWrittenFile(rank, "graph", graphFilename);
 
     boost::chrono::duration<double> seconds =
         boost::chrono::nanoseconds(timer.elapsed().user);
@@ -1108,7 +1118,7 @@ bool printFilesGraphBinary(cellIdList& CLact,
     return true;
 }
 
-void printFilesGraphV2(cellIdList& CLact, inputs& input, int rank, DomainListPoly& dpoly){
+bool printFilesGraphV2(cellIdList& CLact, inputs& input, int rank, DomainListPoly& dpoly){
     boost::timer::cpu_timer timer;
     L1map::iterator itLev1;
     L2map::iterator itLev2;
@@ -1136,10 +1146,20 @@ void printFilesGraphV2(cellIdList& CLact, inputs& input, int rank, DomainListPol
     std::string graphfilename = input.NewPrefix + num2Padstr(rank, input.Nzeros) + ".grph";
     std::ofstream graphstream;
     graphstream.open(graphfilename.c_str());
+    if (!graphstream.good()) {
+        std::cout << "Can't open the graph output file "
+                  << graphfilename << std::endl;
+        return false;
+    }
 
     std::string velfilename = input.NewPrefix + num2Padstr(rank, input.Nzeros) + input.outputSuffix;
     std::ofstream velstream;
     velstream.open(velfilename.c_str());
+    if (!velstream.good()) {
+        std::cout << "Can't open the velocity output file "
+                  << velfilename << std::endl;
+        return false;
+    }
 
     for (itLev1 = CLact.CellIds.begin(); itLev1 != CLact.CellIds.end(); ++itLev1){
         for (itLev2 = itLev1->second.begin(); itLev2 != itLev1->second.end(); ++itLev2){
@@ -1195,9 +1215,22 @@ void printFilesGraphV2(cellIdList& CLact, inputs& input, int rank, DomainListPol
     }
     graphstream.close();
     velstream.close();
+    const bool graphWritten = graphstream.good();
+    const bool velocityWritten = velstream.good();
+    if (velocityWritten)
+        reportWrittenFile(rank, "velocity", velfilename);
+    else
+        std::cout << "Failed while writing velocity file "
+                  << velfilename << std::endl;
+    if (graphWritten)
+        reportWrittenFile(rank, "graph", graphfilename);
+    else
+        std::cout << "Failed while writing graph file "
+                  << graphfilename << std::endl;
     boost::chrono::duration<double> seconds = boost::chrono::nanoseconds(timer.elapsed().user);
     std::cout << ". . . .Proc " << rank << " spend " << seconds.count() / 60 << " min to print "
               << cellIdx << " cells and " << velIdx << " velocity points" << std::endl;
+    return graphWritten && velocityWritten;
 }
 
 void printFilesGraph(cellIdList& CLact, inputs& input, int rank, DomainListPoly& dpoly){
@@ -1638,10 +1671,8 @@ int main(int argc, char* argv[])
         if (inp.outputFormat == OutputFormat::BINARY)
             tf = printFilesGraphBinary(CLactual, inp, DomainId,
                                        world.size(), actualDom);
-        else {
-            printFilesGraphV2(CLactual, inp, DomainId, actualDom);
-            tf = true;
-        }
+        else
+            tf = printFilesGraphV2(CLactual, inp, DomainId, actualDom);
         if (!tf)
             return 0;
     }
@@ -1670,6 +1701,11 @@ int main(int argc, char* argv[])
         else {
             std::ofstream outstream;
             outstream.open(outfilename.c_str());
+            if (!outstream.good()) {
+                std::cout << "Can't open the velocity output file "
+                          << outfilename << std::endl;
+                return 0;
+            }
             for (std::vector<PntVel>::iterator it = my_data.begin(); it != my_data.end(); ++it) {
                 outstream << std::setprecision(3) << std::fixed
                           << it->x << " " << it->y << " " << it->z << " " << it->proc << " ";
@@ -1680,6 +1716,12 @@ int main(int argc, char* argv[])
                 outstream << std::endl;
             }
             outstream.close();
+            if (!outstream.good()) {
+                std::cout << "Failed while writing velocity file "
+                          << outfilename << std::endl;
+                return 0;
+            }
+            reportWrittenFile(DomainId, "velocity", outfilename);
         }
     }
 
